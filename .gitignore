@@ -1,0 +1,31 @@
+# Fusion/Python build artefacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Runtime and generated output
+*.log
+*.tcn
+exports/
+generated/
+local-reference-paths.*
+
+# Proprietary/local reference material (never publish)
+TpaCad Manuals/
+TpaCAD Manuals/
+ValidTCN Programs/
+Samples/
+machine-macros/
+private-programs/
+proprietary/
+

@@ -1,0 +1,11 @@
+{
+  "autodeskProduct": "Fusion",
+  "type": "addin",
+  "author": "TribulationInc contributors",
+  "description": {
+    "": "Export CNC-ready plywood body geometry to geometry-only TpaCAD TCN."
+  },
+  "supportedOS": "windows|mac",
+  "editEnabled": true,
+  "version": "1.0.0"
+}
