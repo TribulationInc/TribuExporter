@@ -10,9 +10,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from .model import (
-    Arc2D, EPS_MM, Line2D, MachiningSide, PanelIR, PlanarProfileIR,
+    Arc2D, EPS_MM, Line2D, MachiningFrameKind, MachiningSide,
+    PanelIR, PlanarProfileIR,
     ProfileZMode, TCN_DECIMAL_PLACES, chain_signature, profile_sort_key,
-    profile_selection_key, tcn_quantized,
+    fictive_frame_points_absolute, profile_selection_key, tcn_quantized,
 )
 
 
@@ -37,6 +38,7 @@ class TcnGeometryWriter:
         return [
             profile for profile in profiles
             if profile.provenance == "body_silhouette_outer"
+            or profile.provenance == "fictive_face_boundary"
             or profile_selection_key(panel, profile) in self.selected_profile_keys
         ]
 
@@ -145,17 +147,41 @@ class TcnGeometryWriter:
 
     def render(self, panel: PanelIR) -> str:
         panel.validate()
+        profiles = self.profiles_for_export(panel)
+        emitted_sides = sorted({int(profile.machining_side) for profile in profiles})
+        fictive_sides = set(side for side in emitted_sides if side >= 7)
+        fictive_frames = sorted(
+            (
+                frame for frame in panel.machining_frames
+                if frame.kind == MachiningFrameKind.FICTIVE_FACE
+                and frame.tpa_face_number in fictive_sides
+            ),
+            key=lambda frame: frame.tpa_face_number,
+        )
         output = [
             r"TPA\ALBATROS\EDICAD\02.00",
             f"$={panel.comment}",
-            "::SIDE=1;",
+            "::SIDE=" + ";".join(str(side) for side in emitted_sides) + ";",
             (
                 f"::UNm DL={fmt(panel.stock_width)} "
                 f"DH={fmt(panel.stock_height)} DS={fmt(panel.thickness)}"
             ),
         ]
-        profiles = self.profiles_for_export(panel)
-        for side_number in range(1, 7):
+        if fictive_frames:
+            output.append(f"GEO{{ ::NF={len(fictive_frames)}")
+            for frame in fictive_frames:
+                p0, p1, p2 = fictive_frame_points_absolute(panel, frame)
+                output.extend((
+                    f"GSIDE#{frame.tpa_face_number}{{",
+                    "#1=" + "|".join(fmt(value) for value in p0),
+                    "#2=" + "|".join(fmt(value) for value in p1),
+                    "#3=" + "|".join(fmt(value) for value in p2),
+                    f"#Z={fmt(frame.thickness_mm)}",
+                    "}GSIDE",
+                ))
+            output.append("}GEO")
+        max_side = max([6] + emitted_sides)
+        for side_number in range(1, max_side + 1):
             output.append(f"SIDE#{side_number}{{")
             for profile in profiles:
                 if int(profile.machining_side) == side_number:

@@ -14,7 +14,9 @@ import adsk.core
 import adsk.fusion
 
 from .fusion_extract import extract_panel_ir, make_panel_frame
-from .model import MachiningSide, ProfileZMode, profile_selection_key
+from .model import (
+    MachiningFrameKind, MachiningSide, ProfileZMode, profile_selection_key,
+)
 from .tcn import TcnGeometryWriter
 
 
@@ -24,7 +26,7 @@ COMMAND_DESCRIPTION = "Export body-derived closed profiles to geometry-only TCN"
 WORKSPACE_ID = "FusionSolidEnvironment"
 PANEL_ID = "SolidScriptsAddinsPanel"
 LOG_PATH = Path(tempfile.gettempdir()) / "tribu_tpa_debug.log"
-BUILD_ID = "2026-09-01.15-operator-profile-selection"
+BUILD_ID = "2026-09-01.16-fictive-face-geometry"
 ATTRIBUTE_GROUP = "TribuExporterV1"
 PROFILE_SELECTION_ATTRIBUTE = "profile_export_selection"
 
@@ -160,6 +162,11 @@ def _extract_from_inputs(inputs, logger):
     tolerance = inputs.itemById("tolerance").value * 10.0
     stock_width = inputs.itemById("stock_width").value * 10.0
     stock_height = inputs.itemById("stock_height").value * 10.0
+    inclined_input = inputs.itemById("inclined_faces")
+    inclined_faces = [
+        inclined_input.selection(index).entity
+        for index in range(inclined_input.selectionCount)
+    ]
     if not all((face, p0, px, py)):
         raise ValueError("Select SIDE#1 and exactly one P0, PX, and PY vertex")
     logger.info(
@@ -171,7 +178,7 @@ def _extract_from_inputs(inputs, logger):
         face, frame, margin, tolerance,
         stock_width if stock_width > 1e-5 else None,
         stock_height if stock_height > 1e-5 else None,
-        logger,
+        logger, inclined_faces=inclined_faces,
     )
     return face, panel
 
@@ -214,7 +221,9 @@ def _populate_profile_choices(inputs, state: CommandState, panel) -> None:
     state.profile_keys = []
     for profile in sorted(
             (item for item in panel.profiles
-             if item.provenance != "body_silhouette_outer"),
+             if item.provenance not in (
+                 "body_silhouette_outer", "fictive_face_boundary",
+             )),
             key=lambda item: (
                 int(item.machining_side), -item.z_mm, item.chain.name,
             )):
@@ -231,7 +240,7 @@ def _populate_profile_choices(inputs, state: CommandState, panel) -> None:
         dropdown.listItems.add(_profile_label(profile), selected)
     inputs.itemById("profile_status").text = (
         f"Detected {len(state.profile_keys)} optional profiles. "
-        "FINAL_OUTER_CONTOUR is mandatory and always exported."
+        "FINAL_OUTER_CONTOUR and selected fictive-face loops are always exported."
     )
     state.panel = panel
 
@@ -262,14 +271,34 @@ def _report(panel, writer: TcnGeometryWriter | None = None) -> str:
         f"Geometry-only pre-export report — build {BUILD_ID}",
         "",
         f"Profiles to write: {len(exported_profiles)} (IR profiles: {len(panel.profiles)})",
-        f"Operator-selected optional profiles: {max(0, len(writer.selected_profiles(panel)) - 1)}",
+        f"Selected/mandatory profiles before suppression: {len(writer.selected_profiles(panel))}",
         f"Serializer-only SIDE1 Z0 duplicates suppressed: {len(suppressed_pairs)}",
         f"Local profile depths by assigned face: {'; '.join(depth_summary)}",
         f"Stock: {panel.stock_width:.3f} × {panel.stock_height:.3f} × {panel.thickness:.3f} mm",
         f"Curve chordal tolerance: {panel.curve_tolerance_mm:.4f} mm",
         f"Body faces inventoried: {len(panel.face_facts)}",
+        f"Fictive faces emitted: {sum(1 for frame in panel.machining_frames if frame.kind == MachiningFrameKind.FICTIVE_FACE)}",
         "",
     ]
+    fictive_frames = [
+        frame for frame in panel.machining_frames
+        if frame.kind == MachiningFrameKind.FICTIVE_FACE
+    ]
+    if fictive_frames:
+        lines.append("Fictive face frames (panel coordinates, top Z=0):")
+        for machining_frame in sorted(
+                fictive_frames, key=lambda item: item.tpa_face_number):
+            origin = ", ".join(f"{value:.4f}" for value in machining_frame.origin)
+            x_axis = ", ".join(f"{value:.6f}" for value in machining_frame.x_axis)
+            y_axis = ", ".join(f"{value:.6f}" for value in machining_frame.y_axis)
+            z_axis = ", ".join(f"{value:.6f}" for value in machining_frame.outward_axis)
+            lines.append(
+                f"- SIDE{machining_frame.tpa_face_number}: P0=({origin}), "
+                f"X=({x_axis}), Y=({y_axis}), Z=({z_axis}), "
+                f"size={machining_frame.length_mm:.4f} × "
+                f"{machining_frame.height_mm:.4f} mm"
+            )
+        lines.append("")
     for index, profile in enumerate(exported_profiles, 1):
         role = " [MANDATORY FINISHED OUTER CONTOUR]" if (
             profile.provenance == "body_silhouette_outer"
@@ -377,7 +406,7 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
 class InputChangedHandler(adsk.core.InputChangedEventHandler):
     _GEOMETRY_INPUTS = {
         "side1", "p0", "px", "py", "margin", "tolerance",
-        "stock_width", "stock_height",
+        "stock_width", "stock_height", "inclined_faces",
     }
 
     def __init__(self, inputs, state: CommandState):
@@ -458,6 +487,12 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
             selection = inputs.addSelectionInput(input_id, label, prompt)
             selection.addSelectionFilter("Vertices")
             selection.setSelectionLimits(1, 1)
+        inclined = inputs.addSelectionInput(
+            "inclined_faces", "Fictive faces (SIDE7+)",
+            "Select zero or more planar inclined faces on this body",
+        )
+        inclined.addSelectionFilter("PlanarFaces")
+        inclined.setSelectionLimits(0, 0)
         inputs.addValueInput(
             "margin", "Stock allowance each side", "mm",
             adsk.core.ValueInput.createByString("5 mm"),

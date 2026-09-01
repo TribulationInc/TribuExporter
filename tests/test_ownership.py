@@ -71,6 +71,41 @@ class OwnershipTests(unittest.TestCase):
         panel.validate()
         self.assertEqual(panel.profiles, [])
 
+    def test_emitted_fictive_profile_requires_matching_side7_frame_and_owner(self):
+        frame = MachiningFrameIR(
+            "side7", MachiningFrameKind.FICTIVE_FACE, 7,
+            (0, 0, -2), (1, 0, 0), (0, 0.8, 0.6), (0, -0.6, 0.8),
+            10, 10, 18, "selected inclined face",
+        )
+        profile = self._profile("inclined-face", 7)
+        profile.provenance = "fictive_face_boundary"
+        fact = FaceFactIR(
+            "inclined-face", "Plane", (0, -0.6, 0.8), "side7", 7,
+            None,
+        )
+        owner = FaceOwnershipIR(
+            "inclined-face", OwnershipState.EXPOSED, "side7", 7, 0,
+            ("operator_selected_fictive_face",),
+        )
+        panel = PanelIR(
+            100, 50, 18, StockAllowance(), [profile],
+            machining_frames=[frame], face_facts=[fact],
+            face_ownership=[owner],
+        )
+        panel.validate()
+
+    def test_left_handed_fictive_frame_is_rejected(self):
+        frame = MachiningFrameIR(
+            "side7", MachiningFrameKind.FICTIVE_FACE, 7,
+            (0, 0, 0), (1, 0, 0), (0, 0.8, 0.6), (0, 0.6, -0.8),
+            10, 10, 18,
+        )
+        panel = PanelIR(
+            100, 50, 18, StockAllowance(), machining_frames=[frame],
+        )
+        with self.assertRaisesRegex(ValueError, "right-handed"):
+            panel.validate()
+
     def test_extracted_profile_has_exactly_one_exposed_face_owner(self):
         fact = FaceFactIR(
             "face-1", "Plane", (0, 0, 1), "side1", MachiningSide.SIDE1,

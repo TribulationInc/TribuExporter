@@ -43,6 +43,9 @@ class V3:
     def __sub__(self, other: "V3") -> "V3":
         return V3(self.x - other.x, self.y - other.y, self.z - other.z)
 
+    def __add__(self, other: "V3") -> "V3":
+        return V3(self.x + other.x, self.y + other.y, self.z + other.z)
+
     def scaled(self, factor: float) -> "V3":
         return V3(self.x * factor, self.y * factor, self.z * factor)
 
@@ -449,6 +452,51 @@ def _directional_first_hit_is_face(
     return False, (f"side{int(side)}_ray_missed_selected_body",)
 
 
+def _directional_first_hit_along_face_normal(
+        candidate, clearance_mm: float) -> tuple[bool, tuple[str, ...]]:
+    """Prove that an explicitly selected inclined face is outward-accessible."""
+    app = adsk.core.Application.get()
+    design = adsk.fusion.Design.cast(app.activeProduct)
+    if design is None:
+        return False, ("no_active_design_for_access_test",)
+    sample_point = getattr(candidate, "pointOnFace", None) or candidate.centroid
+    ok, normal = candidate.evaluator.getNormalAtPoint(sample_point)
+    if not ok:
+        return False, ("inclined_face_normal_unavailable",)
+    outward = _v3_vector(normal).normalized()
+    sample = _v3_point(sample_point)
+    origin_v = sample + outward.scaled(clearance_mm / CM_TO_MM)
+    inward = outward.scaled(-1.0)
+    origin = adsk.core.Point3D.create(origin_v.x, origin_v.y, origin_v.z)
+    hit_points = adsk.core.ObjectCollection.create()
+    hits = design.rootComponent.findBRepUsingRay(
+        origin, _vector(inward),
+        adsk.fusion.BRepEntityTypes.BRepFaceEntityType,
+        1e-5, False, hit_points,
+    )
+    target_hits = []
+    for index in range(hits.count):
+        hit = adsk.fusion.BRepFace.cast(hits.item(index))
+        if hit is None or not _same_contextual_entity(hit.body, candidate.body):
+            continue
+        travel_cm = (_v3_point(hit_points.item(index)) - origin_v).dot(inward)
+        if travel_cm >= -EPS_CM:
+            target_hits.append((travel_cm, hit))
+    if not target_hits:
+        return False, ("inclined_normal_ray_missed_selected_body",)
+    _, first = min(target_hits, key=lambda item: item[0])
+    if _same_contextual_entity(first, candidate):
+        return True, (
+            "operator_selected_fictive_face",
+            "inclined_normal_first_hit_from_outside",
+            f"first_face={_native_id(first)}",
+        )
+    return False, (
+        "selected_inclined_face_is_covered_along_normal",
+        f"first_face={_native_id(first)}",
+    )
+
+
 def _real_machining_frames(stock_width: float, stock_height: float,
                             thickness: float) -> list[MachiningFrameIR]:
     """Return real-face frames in the panel/stock coordinate convention.
@@ -487,10 +535,273 @@ def _real_machining_frames(stock_width: float, stock_height: float,
     ]
 
 
+def _stock_panel_point(point, frame: PanelFrame, xmin: float, ymin: float,
+                       allowance: StockAllowance) -> V3:
+    local = frame.model_to_local_cm(_v3_point(point))
+    return V3(
+        local.x * CM_TO_MM - xmin + allowance.x_minus,
+        local.y * CM_TO_MM - ymin + allowance.y_minus,
+        local.z * CM_TO_MM,
+    )
+
+
+def _fictive_axes(face, frame: PanelFrame) -> tuple[V3, V3, V3]:
+    """Return a deterministic right-handed basis in panel coordinates."""
+    normal = _face_local_normal(face, frame)
+    if normal is None:
+        raise ValueError("Selected fictive face is not planar")
+    z_axis = normal.normalized()
+    panel_x = V3(1.0, 0.0, 0.0)
+    panel_y = V3(0.0, 1.0, 0.0)
+    # Prefer projected panel +X for recognizable/stable programming. Only
+    # switch to +Y when X is effectively parallel to the face normal.
+    reference = panel_x if abs(z_axis.dot(panel_x)) < 0.999 else panel_y
+    x_axis = (reference - z_axis.scaled(reference.dot(z_axis))).normalized()
+    y_axis = z_axis.cross(x_axis).normalized()
+    return x_axis, y_axis, z_axis
+
+
+def _fictive_point2d(point, panel_frame: PanelFrame, xmin: float, ymin: float,
+                      allowance: StockAllowance, origin: V3,
+                      x_axis: V3, y_axis: V3, z_axis: V3) -> Vec2:
+    panel_point = _stock_panel_point(point, panel_frame, xmin, ymin, allowance)
+    delta = panel_point - origin
+    plane_error = abs(delta.dot(z_axis))
+    if plane_error > PLANE_LEVEL_TOLERANCE_MM:
+        raise ValueError(
+            f"Fictive-face boundary leaves its plane by {plane_error:.6f} mm"
+        )
+    return Vec2(delta.dot(x_axis), delta.dot(y_axis))
+
+
+def _fictive_clockwise(normal, coedge, outward_axis: V3) -> bool:
+    curve_normal = _v3_vector(normal).normalized()
+    alignment = curve_normal.dot(outward_axis)
+    if abs(alignment) < 0.999:
+        raise ValueError("Circular boundary is not coplanar with fictive face")
+    return (alignment > 0) == bool(coedge.isOpposedToEdge)
+
+
+def _fictive_coedge_segments(
+        coedge, panel_frame: PanelFrame, xmin: float, ymin: float,
+        allowance: StockAllowance, origin: V3, x_axis: V3, y_axis: V3,
+        z_axis: V3, curve_tolerance_mm: float) -> list[Line2D | Arc2D]:
+    def project(point):
+        return _fictive_point2d(
+            point, panel_frame, xmin, ymin, allowance,
+            origin, x_axis, y_axis, z_axis,
+        )
+
+    geometry = coedge.edge.geometry
+    endpoints = _edge_endpoints(coedge)
+    line = adsk.core.Line3D.cast(geometry)
+    if line is not None and endpoints:
+        return [Line2D(project(endpoints[0]), project(endpoints[1]))]
+
+    arc = adsk.core.Arc3D.cast(geometry)
+    circle = adsk.core.Circle3D.cast(geometry)
+    if arc is not None and endpoints:
+        return [Arc2D(
+            project(endpoints[0]), project(endpoints[1]), project(arc.center),
+            _fictive_clockwise(arc.normal, coedge, z_axis),
+        )]
+    if circle is not None:
+        center = project(circle.center)
+        start = Vec2(center.x + circle.radius * CM_TO_MM, center.y)
+        return [Arc2D(
+            start, start, center,
+            _fictive_clockwise(circle.normal, coedge, z_axis), True,
+        )]
+
+    evaluator = coedge.edge.evaluator
+    ok, start_parameter, end_parameter = evaluator.getParameterExtents()
+    if not ok:
+        raise ValueError("Unbounded/unevaluable fictive-face curve")
+    ok, points = evaluator.getStrokes(
+        start_parameter, end_parameter, curve_tolerance_mm / CM_TO_MM,
+    )
+    if not ok or points is None or len(points) < 2:
+        raise ValueError(
+            f"Fictive-face curve linearization failed at "
+            f"{curve_tolerance_mm:.6f} mm"
+        )
+    ordered = list(points)
+    if coedge.isOpposedToEdge:
+        ordered.reverse()
+    if endpoints:
+        ordered[0], ordered[-1] = endpoints
+    projected = [project(point) for point in ordered]
+    segments = [
+        Line2D(left, right) for left, right in zip(projected, projected[1:])
+        if left.distance_to(right) > 1e-9
+    ]
+    if not segments:
+        raise ValueError("Linearized fictive-face curve collapsed to zero length")
+    return segments
+
+
+def _fictive_loop_chain(
+        loop, panel_frame: PanelFrame, xmin: float, ymin: float,
+        allowance: StockAllowance, origin: V3, x_axis: V3, y_axis: V3,
+        z_axis: V3, tolerance_mm: float, name: str) -> CurveChain2D:
+    segments = []
+    source_ids = []
+    for index in range(loop.coEdges.count):
+        coedge = loop.coEdges.item(index)
+        source_ids.append(_native_id(coedge.edge))
+        segments.extend(_fictive_coedge_segments(
+            coedge, panel_frame, xmin, ymin, allowance,
+            origin, x_axis, y_axis, z_axis, tolerance_mm,
+        ))
+    chain = CurveChain2D(segments, True, tuple(source_ids), name)
+    chain.validate()
+    return chain
+
+
+def _arc_extrema_points(arc: Arc2D) -> list[Vec2]:
+    points = [arc.start, arc.end]
+    radius = arc.center.distance_to(arc.start)
+    if radius <= 1e-12:
+        return points
+    start = math.atan2(arc.start.y - arc.center.y,
+                       arc.start.x - arc.center.x)
+    end = math.atan2(arc.end.y - arc.center.y,
+                     arc.end.x - arc.center.x)
+
+    def contains(angle: float) -> bool:
+        if arc.full_circle:
+            return True
+        if arc.clockwise:
+            sweep = (start - end) % (2.0 * math.pi)
+            position = (start - angle) % (2.0 * math.pi)
+        else:
+            sweep = (end - start) % (2.0 * math.pi)
+            position = (angle - start) % (2.0 * math.pi)
+        return position <= sweep + 1e-12
+
+    for angle in (0.0, math.pi / 2.0, math.pi, 3.0 * math.pi / 2.0):
+        if contains(angle):
+            points.append(Vec2(
+                arc.center.x + radius * math.cos(angle),
+                arc.center.y + radius * math.sin(angle),
+            ))
+    return points
+
+
+def _chains_bounds(chains: list[CurveChain2D]) -> tuple[float, float, float, float]:
+    points = []
+    for chain in chains:
+        for segment in chain.segments:
+            if isinstance(segment, Arc2D):
+                points.extend(_arc_extrema_points(segment))
+            else:
+                points.extend((segment.start, segment.end))
+    if not points:
+        raise ValueError("Selected fictive face has no boundary geometry")
+    return (
+        min(point.x for point in points), max(point.x for point in points),
+        min(point.y for point in points), max(point.y for point in points),
+    )
+
+
+def _translate_chain(chain: CurveChain2D, dx: float, dy: float,
+                     name: str) -> CurveChain2D:
+    translated = []
+    for segment in chain.segments:
+        start = Vec2(segment.start.x + dx, segment.start.y + dy)
+        end = Vec2(segment.end.x + dx, segment.end.y + dy)
+        if isinstance(segment, Line2D):
+            translated.append(Line2D(start, end))
+        else:
+            translated.append(Arc2D(
+                start, end,
+                Vec2(segment.center.x + dx, segment.center.y + dy),
+                segment.clockwise, segment.full_circle,
+            ))
+    result = CurveChain2D(
+        translated, chain.closed, chain.source_ids, name, chain.diagnostics,
+    )
+    result.validate()
+    return result
+
+
+def _inclined_sort_key(face, panel_frame: PanelFrame, xmin: float,
+                       ymin: float) -> tuple:
+    normal = _face_local_normal(face, panel_frame)
+    x, y, z = _finished_xyz(face.centroid, panel_frame, xmin, ymin)
+    edge_tokens = []
+    for index in range(face.edges.count):
+        edge = face.edges.item(index)
+        endpoints = []
+        for vertex in (edge.startVertex, edge.endVertex):
+            if vertex is not None:
+                endpoints.append(tuple(
+                    round(value, 6) for value in _finished_xyz(
+                        vertex.geometry, panel_frame, xmin, ymin,
+                    )
+                ))
+        edge_tokens.append((
+            _surface_type(edge), tuple(sorted(endpoints)),
+            round(edge.length * CM_TO_MM, 6),
+        ))
+    return (
+        tuple(round(value, 9) for value in (normal.x, normal.y, normal.z)),
+        round(normal.x * x + normal.y * y + normal.z * z, 6),
+        tuple(round(value, 6) for value in (x, y, z)),
+        round(face.area * CM_TO_MM * CM_TO_MM, 6),
+        tuple(sorted(edge_tokens)),
+    )
+
+
+def _build_fictive_face(
+        source_face, side_number: int, panel_frame: PanelFrame,
+        xmin: float, ymin: float, allowance: StockAllowance,
+        thickness_mm: float, curve_tolerance_mm: float,
+) -> tuple[MachiningFrameIR, list[tuple[object, CurveChain2D]]]:
+    x_axis, y_axis, z_axis = _fictive_axes(source_face, panel_frame)
+    origin = _stock_panel_point(
+        source_face.pointOnFace, panel_frame, xmin, ymin, allowance,
+    )
+    raw = []
+    for index in range(source_face.loops.count):
+        loop = source_face.loops.item(index)
+        name = f"side{side_number}_face_{_native_id(source_face)}_loop_{index + 1}"
+        raw.append((loop, _fictive_loop_chain(
+            loop, panel_frame, xmin, ymin, allowance,
+            origin, x_axis, y_axis, z_axis, curve_tolerance_mm, name,
+        )))
+    xmin_local, xmax_local, ymin_local, ymax_local = _chains_bounds(
+        [chain for _, chain in raw],
+    )
+    length = xmax_local - xmin_local
+    height = ymax_local - ymin_local
+    if length <= 1e-8 or height <= 1e-8:
+        raise ValueError("Selected fictive face has degenerate local dimensions")
+    shifted_origin = (
+        origin + x_axis.scaled(xmin_local) + y_axis.scaled(ymin_local)
+    )
+    frame_ir = MachiningFrameIR(
+        f"side{side_number}", MachiningFrameKind.FICTIVE_FACE, side_number,
+        (shifted_origin.x, shifted_origin.y, shifted_origin.z),
+        (x_axis.x, x_axis.y, x_axis.z),
+        (y_axis.x, y_axis.y, y_axis.z),
+        (z_axis.x, z_axis.y, z_axis.z),
+        length, height, thickness_mm,
+        f"operator-selected inclined Fusion face {_native_id(source_face)}",
+    )
+    shifted = [
+        (loop, _translate_chain(chain, -xmin_local, -ymin_local, chain.name))
+        for loop, chain in raw
+    ]
+    return frame_ir, shifted
+
+
 def _inventory_body(face, frame: PanelFrame, xmin: float, ymin: float,
                     allowance: StockAllowance, stock_width: float,
                     stock_height: float,
-                    thickness_mm: float) -> tuple[list[FaceFactIR], list[FaceOwnershipIR]]:
+                    thickness_mm: float,
+                    fictive_side_by_face: dict[str, int] | None = None,
+                    ) -> tuple[list[FaceFactIR], list[FaceOwnershipIR]]:
     """Inventory the complete selected solid before constructing profiles.
 
     Orientation proposes a real machining side. The exact face must then be
@@ -500,6 +811,7 @@ def _inventory_body(face, frame: PanelFrame, xmin: float, ymin: float,
     facts: list[FaceFactIR] = []
     ownership: list[FaceOwnershipIR] = []
     selected_id = _native_id(face)
+    fictive_side_by_face = fictive_side_by_face or {}
     bottom_threshold = math.cos(math.radians(PLANE_ANGLE_TOLERANCE_DEG))
     clearance_mm = max(stock_width, stock_height, thickness_mm) + 10.0
 
@@ -508,7 +820,9 @@ def _inventory_body(face, frame: PanelFrame, xmin: float, ymin: float,
         source_id = _native_id(candidate)
         normal = _face_local_normal(candidate, frame)
         normal_tuple = None if normal is None else (normal.x, normal.y, normal.z)
-        side = _orientation_side(candidate, frame)
+        real_side = _orientation_side(candidate, frame)
+        fictive_side = fictive_side_by_face.get(source_id)
+        side = fictive_side if fictive_side is not None else real_side
         plane = (_face_plane(candidate, frame, xmin, ymin)
                  if normal is not None else None)
         is_selected = source_id == selected_id
@@ -524,6 +838,19 @@ def _inventory_body(face, frame: PanelFrame, xmin: float, ymin: float,
             evidence = ("operator_selected_side1",)
             owner_side = MachiningSide.SIDE1
             owner_frame = "side1"
+            depth = 0.0
+        elif fictive_side is not None:
+            exposed, evidence = _directional_first_hit_along_face_normal(
+                candidate, clearance_mm,
+            )
+            if not exposed:
+                raise ValueError(
+                    f"Selected inclined Fusion face {source_id} is not "
+                    f"accessible along its outward normal: {', '.join(evidence)}"
+                )
+            state = OwnershipState.EXPOSED
+            owner_side = fictive_side
+            owner_frame = f"side{fictive_side}"
             depth = 0.0
         elif normal is not None and normal.z <= -bottom_threshold:
             state = OwnershipState.EXCLUDED_BOTTOM
@@ -586,13 +913,33 @@ def _body_silhouette_chain(face, frame: PanelFrame, xmin: float, ymin: float,
         adsk.core.Point3D.create(frame.origin.x, frame.origin.y, frame.origin.z),
         _vector(frame.z_axis),
     )
+    source_body = face.body
+    source_plane = plane
+    occurrence = getattr(face, "assemblyContext", None)
+    occurrence_transform = None
+    if occurrence is not None:
+        # TemporaryBRep projection works in the native component context even
+        # when the command selection is an occurrence proxy. Convert the
+        # projection plane into that native context, then transform the
+        # resulting temporary outline back into the shared occurrence context.
+        occurrence_transform = occurrence.transform2.copy()
+        inverse = occurrence_transform.copy()
+        if not inverse.invert():
+            raise ValueError("Could not invert the selected occurrence transform")
+        source_plane = plane.copy()
+        if not source_plane.transformBy(inverse):
+            raise ValueError("Could not transform SIDE1 plane into native context")
+        source_body = getattr(face.body, "nativeObject", None) or face.body
     # Fusion API length units are centimetres.  A positive value is never
     # replaced with Fusion's looser bounding-box-relative default.
     outline_body, contains_approximation = manager.createProjectedBodyOutline(
-        face.body, plane, tolerance_mm / CM_TO_MM,
+        source_body, source_plane, tolerance_mm / CM_TO_MM,
     )
     if outline_body is None:
         raise ValueError("Fusion could not compute the complete body silhouette")
+    if occurrence_transform is not None and not manager.transform(
+            outline_body, occurrence_transform):
+        raise ValueError("Could not return projected outline to occurrence context")
 
     outer_loops = []
     for face_index in range(outline_body.faces.count):
@@ -625,7 +972,7 @@ def extract_panel_ir(face, frame: PanelFrame, stock_margin_mm: float,
                      curve_tolerance_mm: float = 0.01,
                      explicit_stock_width_mm: float | None = None,
                      explicit_stock_height_mm: float | None = None,
-                     logger=None) -> PanelIR:
+                     logger=None, inclined_faces=()) -> PanelIR:
     xmin, xmax, ymin, ymax, thickness = panel_extents(face, frame)
     width, height = xmax - xmin, ymax - ymin
     allowance = StockAllowance(stock_margin_mm, stock_margin_mm,
@@ -637,12 +984,60 @@ def extract_panel_ir(face, frame: PanelFrame, stock_margin_mm: float,
     profiles: list[PlanarProfileIR] = []
     unsupported: list[UnsupportedRegionIR] = []
 
+    selected_inclined = []
+    selected_ids = set()
+    for selected in inclined_faces or ():
+        candidate = adsk.fusion.BRepFace.cast(selected)
+        if candidate is None:
+            raise ValueError("Every fictive-face selection must be a Fusion BRepFace")
+        if not _same_contextual_entity(candidate.body, face.body):
+            raise ValueError("Every selected inclined face must belong to the SIDE1 body")
+        source_id = _native_id(candidate)
+        if source_id == _native_id(face):
+            raise ValueError("SIDE1 cannot also be selected as a fictive face")
+        if source_id in selected_ids:
+            continue
+        if adsk.core.Plane.cast(candidate.geometry) is None:
+            raise ValueError(f"Selected fictive face {source_id} is not planar")
+        if _orientation_side(candidate, frame) is not None:
+            raise ValueError(
+                f"Selected face {source_id} is orthogonal to the panel frame; "
+                "use its real TPA SIDE1/3/4/5/6 assignment"
+            )
+        selected_ids.add(source_id)
+        selected_inclined.append(candidate)
+    if len(selected_inclined) > 93:
+        raise ValueError("TpaCAD supports at most fictive faces SIDE7 through SIDE99")
+    selected_inclined.sort(
+        key=lambda item: _inclined_sort_key(item, frame, xmin, ymin),
+    )
+
+    fictive_built = []
+    for index, source_face in enumerate(selected_inclined, 7):
+        frame_ir, loop_chains = _build_fictive_face(
+            source_face, index, frame, xmin, ymin, allowance,
+            thickness, curve_tolerance_mm,
+        )
+        fictive_built.append((source_face, frame_ir, loop_chains))
+        if logger:
+            logger.info(
+                "Fictive SIDE%d source_face=%s loops=%d "
+                "origin=%r x=%r y=%r z=%r size=%.6fx%.6f",
+                index, _native_id(source_face), len(loop_chains),
+                frame_ir.origin, frame_ir.x_axis, frame_ir.y_axis,
+                frame_ir.outward_axis, frame_ir.length_mm,
+                frame_ir.height_mm,
+            )
     machining_frames = _real_machining_frames(
         stock_width, stock_height, thickness,
-    )
+    ) + [item[1] for item in fictive_built]
+    fictive_side_by_face = {
+        _native_id(source_face): frame_ir.tpa_face_number
+        for source_face, frame_ir, _ in fictive_built
+    }
     face_facts, face_ownership = _inventory_body(
         face, frame, xmin, ymin, allowance, stock_width, stock_height,
-        thickness,
+        thickness, fictive_side_by_face,
     )
 
     silhouette, silhouette_approximated = _body_silhouette_chain(
@@ -697,6 +1092,8 @@ def extract_panel_ir(face, frame: PanelFrame, stock_margin_mm: float,
     for face_index in range(face.body.faces.count):
         candidate = face.body.faces.item(face_index)
         if _native_id(candidate) == _native_id(face):
+            continue
+        if _native_id(candidate) in fictive_side_by_face:
             continue
         owner = ownership_by_id[_native_id(candidate)]
         if (owner.state == OwnershipState.EXPOSED and
@@ -764,6 +1161,33 @@ def extract_panel_ir(face, frame: PanelFrame, stock_margin_mm: float,
                 profile_id=profile_id,
                 source_face_ids=(source_id,),
                 provenance="fusion_face_boundary",
+                containment=loop_role,
+            ))
+
+    for source_face, frame_ir, loop_chains in fictive_built:
+        source_id = _native_id(source_face)
+        side_number = frame_ir.tpa_face_number
+        for loop_index, (loop, chain) in enumerate(loop_chains, 1):
+            if loop.isOuter:
+                loop_role = "outer"
+            else:
+                inner_before = sum(
+                    1 for prior, _ in loop_chains[:loop_index - 1]
+                    if not prior.isOuter
+                )
+                loop_role = f"inner_{inner_before + 1}"
+            profile_id = (
+                f"side{side_number}_face_{source_id}_fictive_{loop_role}"
+            )
+            chain.name = profile_id
+            profiles.append(PlanarProfileIR(
+                chain=chain,
+                z_mm=0.0,
+                machining_side=side_number,
+                geometric_plane=_face_plane(source_face, frame, xmin, ymin),
+                profile_id=profile_id,
+                source_face_ids=(source_id,),
+                provenance="fictive_face_boundary",
                 containment=loop_role,
             ))
 

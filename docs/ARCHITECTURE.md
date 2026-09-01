@@ -168,13 +168,35 @@ execution.
 ## Real and future fictive machining frames
 
 Profiles reference a machining coordinate frame. SIDE1 and SIDE3-SIDE6 use
-predefined real-face frames. Future operator-approved inclined planes use the
-same IR as fictive frames, with P0 as origin, P1 defining local X, an
-orthogonal local Y derived toward P2, and an explicit outward/tool-access Z
-axis. Detecting an inclined Fusion face never creates a fictive TPA face by
-itself.
+predefined real-face frames. Explicitly operator-selected inclined planar
+BRepFaces use the same IR as fictive frames. They are numbered deterministically
+from SIDE7 after sorting by their panel-space plane and position; selection
+click order does not affect numbering.
 
-This follows the TpaCAD fictive-face model while preserving the project rule
+For each selected face:
+
+- the outward Fusion BRep normal becomes local +Z;
+- projected panel +X becomes local +X, with panel +Y as the near-parallel
+  fallback;
+- local +Y is `Z × X`, so `X × Y = Z` and the frame is right-handed;
+- P0 is the minimum local XY corner of the complete emitted trimmed boundary;
+- P1 and P2 define the exact local length and height;
+- P0/P1/P2 are serialized in absolute TPA piece coordinates (`Zbottom=0`);
+- every loop remains owned by that one source BRepFace and is emitted at local
+  Z=0 on its assigned SIDE7+.
+
+The exact selected face must also be the first selected-body hit when approached
+along its outward normal. Covered or non-planar selections fail instead of
+creating plausible but unworkable coordinate systems. Detecting an inclined
+face never creates a fictive TPA face by itself; explicit selection is required.
+
+Assembly proxies are normalized deliberately: temporary whole-body silhouette
+projection occurs in native component coordinates and is transformed back into
+the selected occurrence context before it is combined with occurrence-space
+face geometry.
+
+This follows the TpaCAD fictive-face model (`GEO` / `GSIDE#7+` with P0, P1,
+P2 and face thickness) while preserving the project rule
 that machining intent, rather than arbitrary BRep topology, decides whether an
 inclined plane deserves a machining coordinate system.
 

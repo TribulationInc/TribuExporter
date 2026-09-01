@@ -2,14 +2,40 @@ import unittest
 
 from tribu_exporter.model import (
     Arc2D, CurveChain2D, Line2D, PanelIR, PlanarProfileIR,
-    MachiningSide, ProfileZMode, StockAllowance, Vec2,
-    profile_selection_key,
+    MachiningFrameIR, MachiningFrameKind, MachiningSide, ProfileZMode,
+    StockAllowance, Vec2, fictive_local_to_panel, profile_selection_key,
 )
 from tribu_exporter.tcn import TcnGeometryWriter
-from tests.tcn_reader import read_tcn
+from tests.tcn_reader import read_fictive_faces, read_tcn
 
 
 class TcnTests(unittest.TestCase):
+    @staticmethod
+    def _fictive_panel():
+        frame = MachiningFrameIR(
+            "side7", MachiningFrameKind.FICTIVE_FACE, 7,
+            (10, 20, -2),
+            (1, 0, 0),
+            (0, 0.8, 0.6),
+            (0, -0.6, 0.8),
+            100, 50, 18,
+            "synthetic inclined face",
+        )
+        points = [Vec2(0, 0), Vec2(100, 0), Vec2(100, 50), Vec2(0, 50)]
+        chain = CurveChain2D([
+            Line2D(points[index], points[(index + 1) % 4])
+            for index in range(4)
+        ], True, name="inclined-boundary")
+        profile = PlanarProfileIR(
+            chain, 0, machining_side=7, profile_id="inclined-boundary",
+            source_face_ids=("fusion-face-42",),
+            provenance="fictive_face_boundary", containment="outer",
+        )
+        return PanelIR(
+            120, 100, 18, StockAllowance(), [profile],
+            machining_frames=[frame],
+        ), frame
+
     def test_profiles_are_independent_and_keep_z(self):
         outer_points = [Vec2(5, 5), Vec2(105, 5), Vec2(105, 65), Vec2(5, 65)]
         outer = CurveChain2D([
@@ -243,6 +269,63 @@ class TcnTests(unittest.TestCase):
         self.assertEqual(writer.z0_duplicate_pairs(panel), [])
         _, profiles = read_tcn(writer.render(panel))
         self.assertEqual([profile.initial[2] for profile in profiles], [0])
+
+    def test_fictive_face_serializes_as_additional_gside_and_side7(self):
+        panel, _ = self._fictive_panel()
+        text = TcnGeometryWriter(selected_profile_keys=set()).render(panel)
+        faces = read_fictive_faces(text)
+        _, profiles = read_tcn(text)
+        self.assertIn("::SIDE=7;", text)
+        self.assertEqual(len(faces), 1)
+        self.assertEqual(faces[0].side, 7)
+        self.assertEqual(faces[0].p0, (10, 20, 16))
+        self.assertEqual(faces[0].p1, (110, 20, 16))
+        self.assertEqual(faces[0].p2, (10, 60, 46))
+        self.assertEqual(faces[0].thickness, 18)
+        self.assertEqual([profile.side for profile in profiles], [7])
+        self.assertEqual(profiles[0].initial, (0, 0, 0))
+
+    def test_serialized_fictive_face_reconstructs_plane_and_boundary(self):
+        panel, original_frame = self._fictive_panel()
+        text = TcnGeometryWriter().render(panel)
+        face = read_fictive_faces(text)[0]
+        _, profiles = read_tcn(text)
+
+        def subtract(left, right):
+            return tuple(a - b for a, b in zip(left, right))
+
+        def length(vector):
+            return sum(value * value for value in vector) ** 0.5
+
+        def normalized(vector):
+            magnitude = length(vector)
+            return tuple(value / magnitude for value in vector)
+
+        x_axis = normalized(subtract(face.p1, face.p0))
+        p2_vector = subtract(face.p2, face.p0)
+        projection = sum(a * b for a, b in zip(p2_vector, x_axis))
+        y_axis = normalized(tuple(
+            value - projection * axis
+            for value, axis in zip(p2_vector, x_axis)
+        ))
+
+        local_points = [Vec2(*profiles[0].initial[:2])]
+        local_points.extend(Vec2(values[1], values[2])
+                            for _, values in profiles[0].operations)
+        for local in local_points:
+            reconstructed_absolute = tuple(
+                face.p0[index]
+                + local.x * x_axis[index]
+                + local.y * y_axis[index]
+                for index in range(3)
+            )
+            reconstructed_panel = (
+                reconstructed_absolute[0], reconstructed_absolute[1],
+                reconstructed_absolute[2] - panel.thickness,
+            )
+            expected = fictive_local_to_panel(original_frame, local)
+            for actual, wanted in zip(reconstructed_panel, expected):
+                self.assertAlmostEqual(actual, wanted, places=4)
 
 
 if __name__ == "__main__":

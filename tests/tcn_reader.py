@@ -17,6 +17,46 @@ class SemanticProfile:
     operations: list[tuple[str, dict[int, float]]]
 
 
+@dataclass
+class SemanticFictiveFace:
+    side: int
+    p0: tuple[float, float, float]
+    p1: tuple[float, float, float]
+    p2: tuple[float, float, float]
+    thickness: float
+
+
+def read_fictive_faces(text: str) -> list[SemanticFictiveFace]:
+    faces = []
+    active_side = None
+    points = {}
+    thickness = None
+    for line in text.splitlines():
+        match = re.fullmatch(r"GSIDE#(\d+)\{", line)
+        if match:
+            active_side = int(match.group(1))
+            points = {}
+            thickness = None
+            continue
+        if active_side is None:
+            continue
+        point_match = re.fullmatch(r"#([123])=([^|]+)\|([^|]+)\|([^|]+)", line)
+        if point_match:
+            points[int(point_match.group(1))] = tuple(
+                float(point_match.group(index)) for index in (2, 3, 4)
+            )
+        elif line.startswith("#Z="):
+            thickness = float(line[3:])
+        elif line == "}GSIDE":
+            if set(points) != {1, 2, 3} or thickness is None:
+                raise ValueError(f"Incomplete GSIDE#{active_side} definition")
+            faces.append(SemanticFictiveFace(
+                active_side, points[1], points[2], points[3], thickness,
+            ))
+            active_side = None
+    return faces
+
+
 def read_tcn(text: str) -> tuple[dict[str, float], list[SemanticProfile]]:
     dimensions = {}
     profiles = []

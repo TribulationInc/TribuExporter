@@ -122,6 +122,41 @@ class MachiningFrameIR:
     thickness_mm: float
     provenance: str = ""
 
+    def validate(self) -> None:
+        if self.kind == MachiningFrameKind.FICTIVE_FACE:
+            if (self.tpa_face_number is not None and
+                    not 7 <= self.tpa_face_number <= 99):
+                raise ValueError("Fictive TPA face number must be between 7 and 99")
+        for name, value in (
+            ("length_mm", self.length_mm),
+            ("height_mm", self.height_mm),
+            ("thickness_mm", self.thickness_mm),
+        ):
+            if value <= 0 or not math.isfinite(value):
+                raise ValueError(f"Machining frame {name} must be finite and > 0")
+        vectors = (self.x_axis, self.y_axis, self.outward_axis)
+        if any(len(vector) != 3 or not all(map(math.isfinite, vector))
+               for vector in vectors):
+            raise ValueError("Machining frame axes must be finite 3D vectors")
+        x, y, z = vectors
+
+        def dot(a, b):
+            return sum(left * right for left, right in zip(a, b))
+
+        if any(abs(dot(vector, vector) - 1.0) > 1e-8 for vector in vectors):
+            raise ValueError("Machining frame axes must be unit length")
+        if any(abs(dot(left, right)) > 1e-8 for left, right in (
+                (x, y), (x, z), (y, z))):
+            raise ValueError("Machining frame axes must be orthogonal")
+        cross = (
+            x[1] * y[2] - x[2] * y[1],
+            x[2] * y[0] - x[0] * y[2],
+            x[0] * y[1] - x[1] * y[0],
+        )
+        if (self.kind == MachiningFrameKind.FICTIVE_FACE and
+                dot(cross, z) < 1.0 - 1e-8):
+            raise ValueError("Machining frame must be right-handed (X x Y = +Z)")
+
 
 @dataclass(frozen=True)
 class FaceFactIR:
@@ -131,7 +166,7 @@ class FaceFactIR:
     surface_type: str
     normal: tuple[float, float, float] | None
     proposed_frame_id: str | None
-    proposed_side: MachiningSide | None
+    proposed_side: int | MachiningSide | None
     plane: "GeometricPlaneIR | None"
     adjacent_face_ids: tuple[str, ...] = ()
     is_selected_side1: bool = False
@@ -144,7 +179,7 @@ class FaceOwnershipIR:
     source_face_id: str
     state: OwnershipState
     machining_frame_id: str | None
-    machining_side: MachiningSide | None
+    machining_side: int | MachiningSide | None
     local_depth_mm: float | None
     evidence: tuple[str, ...] = ()
 
@@ -203,7 +238,7 @@ class CurveChain2D:
 class PlanarProfileIR:
     chain: CurveChain2D
     z_mm: float
-    machining_side: MachiningSide = MachiningSide.SIDE1
+    machining_side: int | MachiningSide = MachiningSide.SIDE1
     geometric_plane: GeometricPlaneIR | None = None
     profile_id: str = ""
     source_face_ids: tuple[str, ...] = ()
@@ -310,6 +345,19 @@ class PanelIR:
             if value <= 0 or not math.isfinite(value):
                 raise ValueError(f"{name} must be a finite value > 0")
         self.allowance.validate()
+        frame_ids = [frame.frame_id for frame in self.machining_frames]
+        frame_sides = [frame.tpa_face_number for frame in self.machining_frames
+                       if frame.tpa_face_number is not None]
+        if len(frame_ids) != len(set(frame_ids)):
+            raise ValueError("Machining frame IDs must be unique")
+        if len(frame_sides) != len(set(frame_sides)):
+            raise ValueError("A TPA face number has more than one machining frame")
+        for machining_frame in self.machining_frames:
+            machining_frame.validate()
+        frame_by_side = {
+            frame.tpa_face_number: frame for frame in self.machining_frames
+            if frame.tpa_face_number is not None
+        }
         fact_ids = [fact.source_face_id for fact in self.face_facts]
         ownership_ids = [item.source_face_id for item in self.face_ownership]
         if len(fact_ids) != len(set(fact_ids)):
@@ -364,15 +412,28 @@ class PanelIR:
                     f"Profile '{profile.chain.name}' has positive access depth "
                     f"Z={profile.z_mm:.6f} mm"
                 )
-            if profile.machining_side == MachiningSide.SIDE1:
+            side_number = int(profile.machining_side)
+            if side_number == MachiningSide.SIDE1:
                 x_limit, y_min, y_max = self.stock_width, 0.0, self.stock_height
                 depth_min = -self.thickness
-            elif profile.machining_side in (MachiningSide.SIDE3, MachiningSide.SIDE5):
+            elif side_number in (MachiningSide.SIDE3, MachiningSide.SIDE5):
                 x_limit, y_min, y_max = self.stock_width, 0.0, self.thickness
                 depth_min = -self.stock_height
-            else:
+            elif side_number in (MachiningSide.SIDE4, MachiningSide.SIDE6):
                 x_limit, y_min, y_max = self.stock_height, 0.0, self.thickness
                 depth_min = -self.stock_width
+            elif 7 <= side_number <= 99:
+                machining_frame = frame_by_side.get(side_number)
+                if (machining_frame is None or
+                        machining_frame.kind != MachiningFrameKind.FICTIVE_FACE):
+                    raise ValueError(
+                        f"Profile on SIDE{side_number} has no fictive machining frame"
+                    )
+                x_limit = machining_frame.length_mm
+                y_min, y_max = 0.0, machining_frame.height_mm
+                depth_min = -machining_frame.thickness_mm
+            else:
+                raise ValueError(f"Unsupported TPA side number: {side_number}")
             if profile.z_mm < depth_min - EPS_MM:
                 raise ValueError(
                     f"Profile '{profile.chain.name}' access depth "
@@ -444,6 +505,37 @@ def panel_to_side_coordinates(
     if side == MachiningSide.SIDE6:
         return Vec2(yp, z_abs), -xp
     raise ValueError(f"Unsupported TPA machining side: {side}")
+
+
+def fictive_local_to_panel(
+    frame: MachiningFrameIR, point: Vec2, z_mm: float = 0.0,
+) -> tuple[float, float, float]:
+    """Reconstruct stock/panel coordinates from one fictive-face coordinate.
+
+    The returned Z uses Tribu's top-relative convention (top=0, bottom=-DS).
+    TCN GSIDE point records add DS to this Z to use TpaCAD's absolute piece Z.
+    """
+    if frame.kind != MachiningFrameKind.FICTIVE_FACE:
+        raise ValueError("Local fictive transform requires a fictive frame")
+    return tuple(
+        frame.origin[index]
+        + point.x * frame.x_axis[index]
+        + point.y * frame.y_axis[index]
+        + z_mm * frame.outward_axis[index]
+        for index in range(3)
+    )
+
+
+def fictive_frame_points_absolute(
+    panel: PanelIR, frame: MachiningFrameIR,
+) -> tuple[tuple[float, float, float], ...]:
+    """Return TpaCAD P0/P1/P2 in absolute piece coordinates."""
+    points = (
+        fictive_local_to_panel(frame, Vec2(0.0, 0.0)),
+        fictive_local_to_panel(frame, Vec2(frame.length_mm, 0.0)),
+        fictive_local_to_panel(frame, Vec2(0.0, frame.height_mm)),
+    )
+    return tuple((x, y, z + panel.thickness) for x, y, z in points)
 
 
 def classify_orthogonal_normal(
@@ -545,6 +637,9 @@ def profile_selection_key(panel: PanelIR, profile: PlanarProfileIR) -> str:
         dx = -panel.allowance.y_minus
         dy = 0.0
         depth = profile.z_mm + panel.allowance.x_minus
+    elif 7 <= int(side) <= 99:
+        dx = dy = 0.0
+        depth = profile.z_mm
     else:
         raise ValueError(f"Unsupported profile side: {side}")
 
