@@ -1,7 +1,7 @@
 import unittest
 
 from tribu_exporter.model import (
-    Arc2D, CurveChain2D, Line2D, PanelIR, PlanarProfileIR,
+    Arc2D, CurveChain2D, HoleIR, Line2D, PanelIR, PlanarProfileIR,
     MachiningSide, StockAllowance, Vec2, chain_signature, profile_sort_key,
     profile_selection_key,
     same_geometric_depth,
@@ -16,6 +16,27 @@ def rectangle(name="rectangle", x0=0, y0=0, x1=100, y1=50):
 
 
 class ModelTests(unittest.TestCase):
+    def test_hole_center_and_depth_must_fit_assigned_side(self):
+        valid = HoleIR(
+            "h1", Vec2(40, 9), 50, 8, MachiningSide.SIDE4,
+            "Hole1@1", "face-1", 50,
+        )
+        PanelIR(100, 60, 18, StockAllowance(), holes=[valid]).validate()
+
+        outside = HoleIR(
+            "h2", Vec2(61, 9), 50, 8, MachiningSide.SIDE4,
+            "Hole2@2", "face-2", 50,
+        )
+        with self.assertRaisesRegex(ValueError, "outside SIDE4"):
+            PanelIR(100, 60, 18, StockAllowance(), holes=[outside]).validate()
+
+        too_deep = HoleIR(
+            "h3", Vec2(40, 9), 101, 8, MachiningSide.SIDE4,
+            "Hole3@3", "face-3", 101,
+        )
+        with self.assertRaisesRegex(ValueError, "exceeds SIDE4 thickness"):
+            PanelIR(100, 60, 18, StockAllowance(), holes=[too_deep]).validate()
+
     def test_closed_chain_is_valid(self):
         rectangle().validate()
 

@@ -21,8 +21,8 @@ from .fusion_identity import (
 from .model import (
     Arc2D, CurveChain2D, Line2D, PanelIR,
     FaceFactIR, FaceOwnershipIR, GeometricPlaneIR, MachiningFrameIR,
-    MachiningFrameKind, MachiningSide, OwnershipState, PlanarProfileIR,
-    ProfileZMode, StockAllowance, UnsupportedRegionIR, Vec2,
+    HoleIR, MachiningFrameKind, MachiningSide, OwnershipState, PlanarProfileIR,
+    ProfileZMode, StockAllowance, UnsupportedHoleIR, UnsupportedRegionIR, Vec2,
     classify_orthogonal_normal, same_geometric_depth,
     panel_to_side_coordinates,
 )
@@ -968,11 +968,269 @@ def _body_silhouette_chain(face, frame: PanelFrame, xmin: float, ymin: float,
     return chain, bool(contains_approximation)
 
 
+def _feature_identifier(feature, index: int) -> str:
+    """Human-readable identity for one native Fusion timeline feature."""
+    name = getattr(feature, "name", None) or "HoleFeature"
+    timeline = getattr(feature, "timelineObject", None)
+    timeline_index = getattr(timeline, "index", None)
+    return f"{name}@{timeline_index if timeline_index is not None else index}"
+
+
+def _feature_modifies_body(feature, body) -> bool:
+    """Use Fusion feature ownership, never cylindrical-face inference."""
+    bodies = getattr(feature, "bodies", None)
+    if bodies is None:
+        return False
+    return any(
+        _same_contextual_entity(bodies.item(index), body)
+        for index in range(bodies.count)
+    )
+
+
+def _hole_context_feature(native_feature, selected_face):
+    occurrence = getattr(selected_face, "assemblyContext", None)
+    if occurrence is None:
+        return native_feature
+    proxy = native_feature.createForAssemblyContext(occurrence)
+    if proxy is None:
+        raise ValueError(
+            f"Could not create assembly-context proxy for {native_feature.name}"
+        )
+    return proxy
+
+
+def _hole_positions_and_entry_face(hole):
+    """Return native HoleFeature centers and its explicitly defined start face.
+
+    Multiple sketch points are still one native HoleFeature and are expanded
+    here.  No BRep cylindrical surface is searched to discover extra holes.
+    """
+    definition = hole.holePositionDefinition
+    if definition is None:
+        raise ValueError("non-parametric HoleFeature has no position definition")
+
+    multi = adsk.fusion.SketchPointsHolePositionDefinition.cast(definition)
+    if multi is not None:
+        points = multi.sketchPoints
+        if points.count == 0:
+            raise ValueError("HoleFeature sketch-point collection is empty")
+        centers = [points.item(index).worldGeometry for index in range(points.count)]
+        entry_entity = points.item(0).parentSketch.referencePlane
+    else:
+        single = adsk.fusion.SketchPointHolePositionDefinition.cast(definition)
+        if single is not None:
+            centers = [single.sketchPoint.worldGeometry]
+            entry_entity = single.sketchPoint.parentSketch.referencePlane
+        else:
+            centers = [hole.position]
+            entry_entity = getattr(definition, "planarEntity", None)
+
+    if any(point is None for point in centers):
+        raise ValueError("HoleFeature did not provide every hole center")
+    entry_face = adsk.fusion.BRepFace.cast(entry_entity)
+    if entry_face is None:
+        kind = getattr(entry_entity, "objectType", type(entry_entity).__name__)
+        raise ValueError(
+            f"hole start is not a BRepFace ({kind}); entry-side ownership is ambiguous"
+        )
+    return centers, entry_face
+
+
+def _fictive_hole_coordinates(point, machining_frame: MachiningFrameIR,
+                              panel_frame: PanelFrame, xmin: float, ymin: float,
+                              allowance: StockAllowance) -> tuple[Vec2, float]:
+    source = _stock_panel_point(point, panel_frame, xmin, ymin, allowance)
+    origin = V3(*machining_frame.origin)
+    delta = source - origin
+    return (
+        Vec2(
+            delta.dot(V3(*machining_frame.x_axis)),
+            delta.dot(V3(*machining_frame.y_axis)),
+        ),
+        delta.dot(V3(*machining_frame.outward_axis)),
+    )
+
+
+def _extract_native_blind_holes(
+        selected_face, panel_frame: PanelFrame, xmin: float, ymin: float,
+        allowance: StockAllowance, stock_width: float, stock_height: float,
+        thickness_mm: float, machining_frames: list[MachiningFrameIR],
+        face_ownership: list[FaceOwnershipIR], logger=None,
+) -> tuple[list[HoleIR], list[UnsupportedHoleIR]]:
+    """Translate only active native, simple, untapped, blind HoleFeatures."""
+    holes: list[HoleIR] = []
+    unsupported: list[UnsupportedHoleIR] = []
+    native_body = getattr(selected_face.body, "nativeObject", None) or selected_face.body
+    features = native_body.parentComponent.features.holeFeatures
+    ownership_by_id = {item.source_face_id: item for item in face_ownership}
+    frame_by_side = {
+        frame.tpa_face_number: frame for frame in machining_frames
+        if frame.tpa_face_number is not None
+    }
+    inward_threshold = math.cos(math.radians(PLANE_ANGLE_TOLERANCE_DEG))
+
+    for feature_index in range(features.count):
+        native_feature = features.item(feature_index)
+        if getattr(native_feature, "isSuppressed", False):
+            continue
+        if not _feature_modifies_body(native_feature, native_body):
+            continue
+        feature_id = _feature_identifier(native_feature, feature_index)
+        diagnostics = []
+
+        if native_feature.holeType != adsk.fusion.HoleTypes.SimpleHoleType:
+            unsupported.append(UnsupportedHoleIR(
+                "Only native simple HoleFeature geometry is supported",
+                feature_id, (f"hole_type={native_feature.holeType}",),
+            ))
+            continue
+        if native_feature.holeTapType != adsk.fusion.HoleTapTypes.SimpleHoleTapType:
+            unsupported.append(UnsupportedHoleIR(
+                "Tapped and clearance HoleFeatures are unsupported",
+                feature_id, (f"tap_type={native_feature.holeTapType}",),
+            ))
+            continue
+
+        extent = native_feature.extentDefinition
+        distance_extent = adsk.fusion.DistanceExtentDefinition.cast(extent)
+        if distance_extent is None:
+            extent_type = getattr(extent, "objectType", type(extent).__name__)
+            reason = (
+                "Through All HoleFeature is unsupported until its exact TpaCAD "
+                "encoding is validated"
+                if "AllExtent" in extent_type else
+                "Only distance-defined blind HoleFeatures are supported"
+            )
+            unsupported.append(UnsupportedHoleIR(
+                reason, feature_id, (f"extent={extent_type}",),
+            ))
+            continue
+
+        context_feature = _hole_context_feature(native_feature, selected_face)
+        try:
+            centers, entry_face = _hole_positions_and_entry_face(context_feature)
+        except ValueError as error:
+            unsupported.append(UnsupportedHoleIR(str(error), feature_id))
+            continue
+        if context_feature.endFaces.count < len(centers):
+            unsupported.append(UnsupportedHoleIR(
+                "HoleFeature has no proven blind end face for every position",
+                feature_id,
+                (f"centers={len(centers)}", f"end_faces={context_feature.endFaces.count}"),
+            ))
+            continue
+
+        entry_face_id = _native_id(entry_face)
+        owner = ownership_by_id.get(entry_face_id)
+        if owner is not None and owner.state == OwnershipState.EXCLUDED_BOTTOM:
+            unsupported.append(UnsupportedHoleIR(
+                "Hole enters from SIDE2/bottom, which is outside the V1 scope",
+                feature_id, (f"entry_face={entry_face_id}",),
+            ))
+            continue
+        if (owner is None or owner.state != OwnershipState.EXPOSED or
+                owner.machining_side is None):
+            state = "not_in_body_inventory" if owner is None else owner.state.value
+            unsupported.append(UnsupportedHoleIR(
+                "Hole entry BRepFace has no proven machining-side access",
+                feature_id, (f"entry_face={entry_face_id}", f"ownership={state}"),
+            ))
+            continue
+        side_number = int(owner.machining_side)
+        machining_frame = frame_by_side.get(side_number)
+        if machining_frame is None:
+            unsupported.append(UnsupportedHoleIR(
+                "Hole entry BRepFace has no emitted machining frame",
+                feature_id, (f"SIDE={side_number}",),
+            ))
+            continue
+
+        direction = _v3_vector(context_feature.direction).normalized()
+        direction_panel = V3(
+            direction.dot(panel_frame.x_axis),
+            direction.dot(panel_frame.y_axis),
+            direction.dot(panel_frame.z_axis),
+        ).normalized()
+        direction_alignment = direction_panel.dot(V3(*machining_frame.outward_axis))
+        if direction_alignment > -inward_threshold:
+            unsupported.append(UnsupportedHoleIR(
+                "Hole axis is not normal and inward from its assigned TPA face",
+                feature_id,
+                (f"SIDE={side_number}", f"outward_dot={direction_alignment:.9f}"),
+            ))
+            continue
+
+        feature_depth_mm = abs(distance_extent.distance.value) * CM_TO_MM
+        diameter_mm = native_feature.holeDiameter.value * CM_TO_MM
+        if feature_depth_mm <= 0 or diameter_mm <= 0:
+            unsupported.append(UnsupportedHoleIR(
+                "HoleFeature diameter and distance must both be positive",
+                feature_id,
+                (f"diameter={diameter_mm}", f"distance={feature_depth_mm}"),
+            ))
+            continue
+
+        for position_index, center_point in enumerate(centers, 1):
+            stock_point = _stock_panel_point(
+                center_point, panel_frame, xmin, ymin, allowance,
+            )
+            if side_number <= 6:
+                center, entry_local_z = panel_to_side_coordinates(
+                    owner.machining_side, stock_point.x, stock_point.y,
+                    stock_point.z, stock_width, stock_height, thickness_mm,
+                )
+            else:
+                center, entry_local_z = _fictive_hole_coordinates(
+                    center_point, machining_frame, panel_frame, xmin, ymin,
+                    allowance,
+                )
+            if entry_local_z > PLANE_LEVEL_TOLERANCE_MM:
+                unsupported.append(UnsupportedHoleIR(
+                    "Hole entry lies outside the assigned TPA face",
+                    feature_id,
+                    (f"instance={position_index}",
+                     f"entry_local_z={entry_local_z:.6f}"),
+                ))
+                continue
+            # TPA #3 is absolute in the active face's local Z.  Include any
+            # stock allowance or recessed entry offset so the modeled hole end
+            # remains unchanged; the serializer emits #3=-depth_mm.
+            depth_from_side_zero = feature_depth_mm - entry_local_z
+            hole_id = f"native_hole_{feature_index + 1}_{position_index}"
+            holes.append(HoleIR(
+                hole_id=hole_id,
+                center=center,
+                depth_mm=depth_from_side_zero,
+                diameter_mm=diameter_mm,
+                machining_side=owner.machining_side,
+                source_feature_id=feature_id,
+                source_entry_face_id=entry_face_id,
+                feature_depth_mm=feature_depth_mm,
+                entry_local_z_mm=entry_local_z,
+            ))
+            diagnostics.append(
+                f"{hole_id}:SIDE{side_number}:X={center.x:.6f}:Y={center.y:.6f}:"
+                f"Z={-depth_from_side_zero:.6f}:D={diameter_mm:.6f}"
+            )
+        if logger:
+            logger.info(
+                "Native HoleFeature %s translated=%d %s",
+                feature_id, len(diagnostics), "; ".join(diagnostics),
+            )
+
+    holes.sort(key=lambda item: (
+        int(item.machining_side), item.center.x, item.center.y,
+        item.depth_mm, item.diameter_mm, item.source_feature_id, item.hole_id,
+    ))
+    return holes, unsupported
+
+
 def extract_panel_ir(face, frame: PanelFrame, stock_margin_mm: float,
                      curve_tolerance_mm: float = 0.01,
                      explicit_stock_width_mm: float | None = None,
                      explicit_stock_height_mm: float | None = None,
-                     logger=None, inclined_faces=()) -> PanelIR:
+                     logger=None, inclined_faces=(),
+                     export_native_holes: bool = False) -> PanelIR:
     xmin, xmax, ymin, ymax, thickness = panel_extents(face, frame)
     width, height = xmax - xmin, ymax - ymin
     allowance = StockAllowance(stock_margin_mm, stock_margin_mm,
@@ -1039,6 +1297,13 @@ def extract_panel_ir(face, frame: PanelFrame, stock_margin_mm: float,
         face, frame, xmin, ymin, allowance, stock_width, stock_height,
         thickness, fictive_side_by_face,
     )
+    holes: list[HoleIR] = []
+    unsupported_holes: list[UnsupportedHoleIR] = []
+    if export_native_holes:
+        holes, unsupported_holes = _extract_native_blind_holes(
+            face, frame, xmin, ymin, allowance, stock_width, stock_height,
+            thickness, machining_frames, face_ownership, logger,
+        )
 
     silhouette, silhouette_approximated = _body_silhouette_chain(
         face, frame, xmin, ymin, curve_tolerance_mm, allowance,
@@ -1211,16 +1476,24 @@ def extract_panel_ir(face, frame: PanelFrame, stock_margin_mm: float,
         machining_frames=machining_frames,
         face_facts=face_facts,
         face_ownership=face_ownership,
+        holes=holes,
+        unsupported_holes=unsupported_holes,
         explicit_stock_width=explicit_stock_width_mm,
         explicit_stock_height=explicit_stock_height_mm,
-        comment="TRIBU Fusion geometry-only export V1 face-owned profiles",
+        comment=(
+            "TRIBU Fusion profiles plus native blind holes V1"
+            if export_native_holes else
+            "TRIBU Fusion geometry-only export V1 face-owned profiles"
+        ),
         curve_tolerance_mm=curve_tolerance_mm,
     )
     panel.validate()
     if logger:
         logger.info(
-            "Extracted profiles=%d inventoried_faces=%d unsupported=%d stock=%.4fx%.4f",
-            len(profiles), len(face_facts), len(unsupported),
+            "Extracted profiles=%d holes=%d unsupported_holes=%d "
+            "inventoried_faces=%d unsupported=%d stock=%.4fx%.4f",
+            len(profiles), len(holes), len(unsupported_holes),
+            len(face_facts), len(unsupported),
             panel.stock_width, panel.stock_height,
         )
     return panel

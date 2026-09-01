@@ -3,7 +3,7 @@
 TribuExporter is a narrow geometry bridge:
 
 ```text
-Fusion BRep extraction → manufacturing-neutral IR → geometry-only TCN
+Fusion extraction → manufacturing-neutral IR → profile-first TCN
 ```
 
 The layers are deliberately separated:
@@ -133,6 +133,34 @@ A fictive face is a machining coordinate system, not a separator for two
 profiles that already belong on the same real face. It is not introduced merely
 to resolve coincident boundaries.
 
+### Explicit native-hole exception
+
+`HoleIR` is separate from `PlanarProfileIR`; a point working can never enter
+profile chaining, duplicate-loop filtering, or profile selection. Extraction
+enumerates native Fusion `HoleFeature` objects and verifies that Fusion reports
+the selected body among the feature's affected bodies. It never searches the
+BRep for cylinders or recognizes hole-like geometry.
+
+Only simple, untapped, distance-defined blind holes are accepted. The native
+feature's start definition must resolve to an inventoried, directionally
+exposed BRep entry face. That face's existing ownership selects SIDE1,
+SIDE3-SIDE6, or an explicitly selected SIDE7+ frame. The center is transformed
+through the same side-local mapping as profiles; the hole axis must be normal
+and inward, and the modelled endpoint must remain within side thickness.
+
+A Rectangular, Circular, or Path Pattern of an already-created HoleFeature is
+not expanded. Fusion exposes the copies as PatternFeature elements rather than
+additional native HoleFeatures. Their resulting BRep boundaries remain
+eligible for the ordinary profile inventory, but they do not acquire drilling
+semantics. The supported repeated-hole workflow is a sketch-point pattern
+followed by one native HoleFeature containing all resulting positions.
+
+The serializer emits one minimal `W#81 ::WTp` per accepted center with absolute
+XY, negative inward depth, diameter, machine/group, and drill type. It never
+emits `#205`, so it does not select a physical tool. This path is opt-in and its
+state is persisted separately from profile choices. Unsupported native
+HoleFeatures remain explicit report items.
+
 ### Operator export selection
 
 Exposure proves that a face *can* be worked from a TPA side; it does not prove
@@ -203,5 +231,6 @@ inclined plane deserves a machining coordinate system.
 ## Explicit boundary
 
 The IR contains no tool, compensation, feed, spindle, pass, setup, pocket,
-rabbet, engraving or drilling instruction. Manufacturing interpretation and CAM
-remain in TpaCAD.
+rabbet, engraving, or inferred drilling instruction. Manufacturing
+interpretation and CAM remain in TpaCAD except for the explicit opt-in native
+simple blind-hole mapping described above.

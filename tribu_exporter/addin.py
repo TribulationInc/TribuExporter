@@ -22,11 +22,13 @@ from .tcn import TcnGeometryWriter
 
 COMMAND_ID = "TribuExporterV1GeometryCommand"
 COMMAND_NAME = "Export TpaCAD Geometry"
-COMMAND_DESCRIPTION = "Export body-derived closed profiles to geometry-only TCN"
+COMMAND_DESCRIPTION = (
+    "Export body-derived profiles and optional native blind holes to TCN"
+)
 WORKSPACE_ID = "FusionSolidEnvironment"
 PANEL_ID = "SolidScriptsAddinsPanel"
 LOG_PATH = Path(tempfile.gettempdir()) / "tribu_tpa_debug.log"
-BUILD_ID = "2026-09-01.16-fictive-face-geometry"
+BUILD_ID = "2026-09-02.17-native-blind-holes"
 ATTRIBUTE_GROUP = "TribuExporterV1"
 PROFILE_SELECTION_ATTRIBUTE = "profile_export_selection"
 
@@ -71,7 +73,7 @@ def _body_name(face, fallback: str) -> str:
 def _save_path(ui, suggested_name: str) -> str | None:
     dialog = ui.createFileDialog()
     dialog.isMultiSelectEnabled = False
-    dialog.title = "Export geometry-only TpaCAD TCN"
+    dialog.title = "Export TpaCAD TCN"
     dialog.filter = "TpaCAD programs (*.tcn);;All files (*.*)"
     dialog.initialFilename = suggested_name + ".tcn"
     if dialog.showSave() != adsk.core.DialogResults.DialogOK:
@@ -111,6 +113,9 @@ def _save_preferences(body, inputs, known_keys: list[str],
             "suppress_z0_duplicates": inputs.itemById(
                 "suppress_z0_duplicates",
             ).value,
+            "export_native_holes": inputs.itemById(
+                "export_native_holes",
+            ).value,
         },
     }
     attribute = _native_body(body).attributes.add(
@@ -140,6 +145,10 @@ def _restore_settings(inputs, preferences: dict) -> None:
         inputs.itemById("suppress_z0_duplicates").value = bool(
             settings["suppress_z0_duplicates"],
         )
+    if "export_native_holes" in settings:
+        inputs.itemById("export_native_holes").value = bool(
+            settings["export_native_holes"],
+        )
 
 
 def _base_inputs_valid(inputs) -> bool:
@@ -162,6 +171,7 @@ def _extract_from_inputs(inputs, logger):
     tolerance = inputs.itemById("tolerance").value * 10.0
     stock_width = inputs.itemById("stock_width").value * 10.0
     stock_height = inputs.itemById("stock_height").value * 10.0
+    export_native_holes = inputs.itemById("export_native_holes").value
     inclined_input = inputs.itemById("inclined_faces")
     inclined_faces = [
         inclined_input.selection(index).entity
@@ -179,6 +189,7 @@ def _extract_from_inputs(inputs, logger):
         stock_width if stock_width > 1e-5 else None,
         stock_height if stock_height > 1e-5 else None,
         logger, inclined_faces=inclined_faces,
+        export_native_holes=export_native_holes,
     )
     return face, panel
 
@@ -278,6 +289,7 @@ def _report(panel, writer: TcnGeometryWriter | None = None) -> str:
         f"Curve chordal tolerance: {panel.curve_tolerance_mm:.4f} mm",
         f"Body faces inventoried: {len(panel.face_facts)}",
         f"Fictive faces emitted: {sum(1 for frame in panel.machining_frames if frame.kind == MachiningFrameKind.FICTIVE_FACE)}",
+        f"Native simple blind holes to write: {len(panel.holes)}",
         "",
     ]
     fictive_frames = [
@@ -329,6 +341,20 @@ def _report(panel, writer: TcnGeometryWriter | None = None) -> str:
         lines.append("Face ownership (classification before profiles):")
         for state, count in sorted(ownership_counts.items()):
             lines.append(f"- {state}: {count}")
+    if panel.holes:
+        lines.extend(("", "Native Fusion HoleFeature workings (W#81):"))
+        for hole in panel.holes:
+            lines.append(
+                f"- {hole.hole_id}: SIDE{int(hole.machining_side)}, "
+                f"X={hole.center.x:.4f}, Y={hole.center.y:.4f}, "
+                f"Z={-hole.depth_mm:.4f}, diameter={hole.diameter_mm:.4f} mm, "
+                f"feature={hole.source_feature_id}, "
+                f"entry face={hole.source_entry_face_id}"
+            )
+    lines.extend(("", f"Unsupported native HoleFeatures: {len(panel.unsupported_holes)}"))
+    for hole in panel.unsupported_holes:
+        detail = f" ({', '.join(hole.diagnostics)})" if hole.diagnostics else ""
+        lines.append(f"- {hole.source_feature_id}: {hole.reason}{detail}")
     lines.extend(("", f"Report-only / unsupported regions: {len(panel.unsupported_regions)}"))
     for region in panel.unsupported_regions:
         z_text = "unknown" if region.z_mm is None else f"{region.z_mm:.4f} mm"
@@ -345,7 +371,9 @@ def _report(panel, writer: TcnGeometryWriter | None = None) -> str:
         "Equal depth, coplanarity, shared edges, and connected endpoints never merge faces.",
         "SIDE1 and orthogonal lateral faces export only after exact-face directional first-hit proof.",
         "Unchecked profiles remain in the geometric inventory but are not written to TCN.",
-        "No setup, tool, compensation, passes, feeds, spindle data, or machine macros will be exported.",
+        "Profiles remain geometry-only: no setup, compensation, passes, feeds, spindle data, or machine macros are exported.",
+        "When enabled, native simple blind holes are executable W#81 point workings; #205 tool selection is never emitted.",
+        "Verify every hole's SIDE, center, negative depth, and diameter before CNC execution.",
         "", "Continue with export?",
     ))
     return "\n".join(lines)
@@ -387,11 +415,13 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                 face.body, self.inputs, self.state.profile_keys,
                 selected_keys, logger,
             )
-            logger.info("Wrote geometry-only TCN: %s", output)
+            logger.info("Wrote profile/hole TCN: %s", output)
             written_count = len(writer.profiles_for_export(panel))
             ui.messageBox(
-                f"Exported {written_count} independent profiles.\n\n{output}\n\n"
-                "Inspect every contour and its Z in TpaCAD before assigning technology.",
+                f"Exported {written_count} independent profiles and "
+                f"{len(panel.holes)} native blind holes.\n\n{output}\n\n"
+                "Inspect every contour, hole, SIDE, coordinate, and depth in "
+                "TpaCAD before assigning technology or executing the program.",
                 "TribuExporter V1",
             )
         except Exception:
@@ -406,7 +436,7 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
 class InputChangedHandler(adsk.core.InputChangedEventHandler):
     _GEOMETRY_INPUTS = {
         "side1", "p0", "px", "py", "margin", "tolerance",
-        "stock_width", "stock_height", "inclined_faces",
+        "stock_width", "stock_height", "inclined_faces", "export_native_holes",
     }
 
     def __init__(self, inputs, state: CommandState):
@@ -513,6 +543,11 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
             "suppress_z0_duplicates",
             "Suppress SIDE1 Z=0 loop when identical deeper loop exists",
             True, "", True,
+        )
+        inputs.addBoolValueInput(
+            "export_native_holes",
+            "Export native Fusion simple blind holes (W#81 CAM)",
+            True, "", False,
         )
         profile_selection = inputs.addDropDownCommandInput(
             "profile_selection", "Profiles to export",

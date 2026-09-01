@@ -1,8 +1,9 @@
-"""Geometry-only TCN serialization.
+"""TCN serialization for profiles and explicitly enabled native holes.
 
 Each PlanarProfileIR starts a new TPA profile with explicit XI/YI. Z is either
 explicit geometric depth or deliberately omitted for setup-controlled geometry.
-No setup, tool, compensation, feed, pass, spindle, or machine macro is emitted.
+Profiles remain geometry-only.  Native blind holes are the one deliberate CAM
+exception and are emitted as minimal W#81 point workings without tool #205.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from pathlib import Path
 
 from .model import (
     Arc2D, EPS_MM, Line2D, MachiningFrameKind, MachiningSide,
-    PanelIR, PlanarProfileIR,
+    HoleIR, PanelIR, PlanarProfileIR,
     ProfileZMode, TCN_DECIMAL_PLACES, chain_signature, profile_sort_key,
     fictive_frame_points_absolute, profile_selection_key, tcn_quantized,
 )
@@ -145,10 +146,28 @@ class TcnGeometryWriter:
                 raise TypeError(f"Unsupported segment type: {type(source).__name__}")
         return result
 
+    def _hole(self, hole: HoleIR) -> str:
+        """Serialize one native simple blind hole in its assigned SIDE frame."""
+        return "".join((
+            "W#81{ ::WTp",
+            " #8015=0",
+            " #201=1",
+            " #203=1",
+            f" #1={fmt(hole.center.x)}",
+            f" #2={fmt(hole.center.y)}",
+            f" #3={fmt(-hole.depth_mm)}",
+            f" #1002={fmt(hole.diameter_mm)}",
+            " #1001=1",
+            " }W",
+        ))
+
     def render(self, panel: PanelIR) -> str:
         panel.validate()
         profiles = self.profiles_for_export(panel)
-        emitted_sides = sorted({int(profile.machining_side) for profile in profiles})
+        emitted_sides = sorted(
+            {int(profile.machining_side) for profile in profiles}
+            | {int(hole.machining_side) for hole in panel.holes}
+        )
         fictive_sides = set(side for side in emitted_sides if side >= 7)
         fictive_frames = sorted(
             (
@@ -186,6 +205,9 @@ class TcnGeometryWriter:
             for profile in profiles:
                 if int(profile.machining_side) == side_number:
                     output.extend(self.profile_lines(panel, profile))
+            for hole in panel.holes:
+                if int(hole.machining_side) == side_number:
+                    output.append(self._hole(hole))
             output.append("}SIDE")
         return "\n".join(output) + "\n"
 

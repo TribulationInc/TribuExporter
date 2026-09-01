@@ -1,12 +1,12 @@
 import unittest
 
 from tribu_exporter.model import (
-    Arc2D, CurveChain2D, Line2D, PanelIR, PlanarProfileIR,
+    Arc2D, CurveChain2D, HoleIR, Line2D, PanelIR, PlanarProfileIR,
     MachiningFrameIR, MachiningFrameKind, MachiningSide, ProfileZMode,
     StockAllowance, Vec2, fictive_local_to_panel, profile_selection_key,
 )
 from tribu_exporter.tcn import TcnGeometryWriter
-from tests.tcn_reader import read_fictive_faces, read_tcn
+from tests.tcn_reader import read_fictive_faces, read_holes, read_tcn
 
 
 class TcnTests(unittest.TestCase):
@@ -57,6 +57,40 @@ class TcnTests(unittest.TestCase):
         self.assertEqual([profile.side for profile in profiles], [1, 1])
         self.assertEqual([len(p.operations) for p in profiles], [4, 1])
         self.assertEqual(profiles[1].operations[0][0], "A01")
+
+    def test_native_blind_hole_uses_minimal_w81_without_tool_205(self):
+        hole = HoleIR(
+            "hole-1", Vec2(25.12567, 9.5), 12.25, 8.0,
+            MachiningSide.SIDE4, "Hole1@7", "face-12", 12.25,
+        )
+        panel = PanelIR(
+            100, 50, 18, StockAllowance(), holes=[hole],
+        )
+        text = TcnGeometryWriter().render(panel)
+        holes = read_holes(text)
+        self.assertEqual(len(holes), 1)
+        self.assertEqual(holes[0].side, 4)
+        self.assertEqual(holes[0].values, {
+            8015: 0, 201: 1, 203: 1, 1: 25.1257, 2: 9.5,
+            3: -12.25, 1002: 8, 1001: 1,
+        })
+        self.assertNotIn("#205=", text)
+        self.assertNotIn("#204=", text)
+        self.assertNotIn(" WS=", text)
+        _, profiles = read_tcn(text)
+        self.assertEqual(profiles, [])
+
+    def test_hole_only_fictive_side_emits_its_gside_definition(self):
+        panel, frame = self._fictive_panel()
+        panel.profiles = []
+        panel.holes = [HoleIR(
+            "inclined-hole", Vec2(30, 20), 10, 6, 7,
+            "Hole9@12", "fusion-face-42", 10,
+        )]
+        text = TcnGeometryWriter(selected_profile_keys=set()).render(panel)
+        self.assertEqual([face.side for face in read_fictive_faces(text)], [7])
+        self.assertEqual([hole.side for hole in read_holes(text)], [7])
+        self.assertIn("::SIDE=7;", text)
 
     def test_subsequent_segments_do_not_start_new_profile(self):
         a, b, c = Vec2(0, 0), Vec2(10, 0), Vec2(0, 0)

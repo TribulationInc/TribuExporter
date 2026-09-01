@@ -5,16 +5,17 @@
 [English guide](docs/USER_GUIDE.md) · [Guida italiana](docs/GUIDA_UTENTE_IT.md) · [Architecture](docs/ARCHITECTURE.md) · [Testing](docs/TESTING.md)
 
 TribuExporter transfers the manufacturing geometry of a panel-like Fusion 360
-solid into a geometry-only `.tcn` file. The objective is simple: preserve the
+solid into a profile-first `.tcn` file. The objective is simple: preserve the
 modelled part, make its contours easy to select in TpaCAD, and leave CAM to the
-operator.
+operator. Native simple blind holes are the one opt-in CAM shortcut.
 
 ```text
 Fusion 360 solid → TribuExporter → independent TPA profiles → TpaCAD CAM
 ```
 
 TribuExporter does **not** choose tools, compensation, feeds, passes, entry
-moves, setup technology, or machining order.
+moves, setup technology, or machining order. Optional native-hole output never
+selects a tool.
 
 ![Independent outer, recessed and internal profiles in TpaCAD](docs/images/tpacad-independent-profiles.png)
 
@@ -33,6 +34,13 @@ moves, setup technology, or machining order.
 - Exact lines and circular arcs/circles.
 - Other bounded planar curves linearized at an explicit chordal tolerance.
 - A persistent profile checklist, stored per Fusion body after export.
+- Optional translation of native Fusion simple blind `HoleFeature` objects to
+  TPA hole workings. Hole-looking BRep cylinders are never inferred.
+
+Fusion feature-pattern copies of a hole are not translated to W#81. For a
+repeated drilling layout, pattern the sketch points first and create the native
+HoleFeature from those points. Pattern-generated BRep boundaries may still
+appear as optional profiles and should be unchecked when they are not wanted.
 
 Lines are not tessellated, arcs remain arcs, and endpoints are never moved to
 repair a contour. Unsupported or ambiguous geometry is reported instead of

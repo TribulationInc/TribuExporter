@@ -8,7 +8,8 @@ materiale rimosso è già rappresentato nel corpo BRep finale.
 
 L'esportatore crea geometria selezionabile. Setup, utensili, compensazione,
 passate in profondità, entrate e uscite, sequenza e ogni altra scelta CAM
-rimangono in TpaCAD.
+rimangono in TpaCAD. I fori ciechi semplici nativi sono l'unica eccezione
+esplicita e facoltativa: se abilitati, diventano lavorazioni foro TPA.
 
 ## Prima dell'esportazione
 
@@ -77,6 +78,47 @@ SIDE1 più profondo possiede lo stesso identico contorno XY completo. Il filtro
 agisce soltanto sulla scrittura TCN: non modifica il modello geometrico e non
 rimuove mai il profilo esterno finito obbligatorio.
 
+### Fori ciechi nativi di Fusion
+
+**Export native Fusion simple blind holes (W#81 CAM)** è disattivato per
+impostazione predefinita. Se abilitato, l'esportatore considera esclusivamente
+gli oggetti `HoleFeature` nativi della timeline che modificano il corpo
+selezionato. Un cilindro BRep simile a un foro, un corpo importato, un cerchio
+DXF o un taglio estruso non viene mai interpretato automaticamente come foro.
+
+Il primo caso supportato è un foro cieco semplice, non filettato e definito da
+una distanza. La faccia BRep reale di ingresso determina la SIDE TPA reale o
+fittizia selezionata; il centro viene trasformato nelle coordinate XY locali e
+la profondità viene scritta come Z negativo verso l'interno. Through All,
+lamature, svasature, filettature, giochi, ingresso ambiguo, SIDE2 e gli altri
+casi non supportati vengono segnalati e omessi.
+
+Questa opzione scrive lavorazioni punto TPA `W#81` eseguibili. Dichiara il
+diametro, ma non emette mai la selezione utensile `#205`. Prima dell'esecuzione
+verifica sempre SIDE, centro, diametro e profondità negativa in TpaCAD. Lo stato
+della casella viene salvato sul corpo Fusion dopo un'esportazione riuscita.
+
+#### Fori ripetuti: usare una serie di punti nello sketch
+
+Se vuoi esportare i fori come W#81, non applicare la serie Rettangolare,
+Circolare o su Percorso al HoleFeature già completato. Fusion mantiene soltanto
+il foro originale come HoleFeature nativo e rappresenta le copie come elementi
+di un PatternFeature. TribuExporter sceglie deliberatamente di non trasformare
+queste copie in lavorazioni foro.
+
+Procedura supportata:
+
+1. Crea il punto dello sketch che definisce la posizione del foro.
+2. Crea la serie dei punti direttamente nello sketch.
+3. Crea un unico HoleFeature nativo selezionando tutti i punti risultanti.
+
+TribuExporter legge tutte le posizioni appartenenti a quel HoleFeature nativo
+e può emettere una lavorazione W#81 per ogni punto. I bordi generati da una
+serie di feature non supportata rimangono normale geometria BRep del corpo
+finito e possono quindi comparire nella checklist dei profili opzionali, spesso
+su una faccia laterale. Lasciali deselezionati quando non devono diventare
+geometria di contorno.
+
 ## Scegliere i profili
 
 Dopo aver completato SIDE1, P0, PX e PY, si popola la lista
@@ -126,7 +168,10 @@ Prima di creare lavorazioni eseguibili:
 5. Controlla ogni quota Z/profondità.
 6. Controlla le curve linearizzate rispetto alla tolleranza dichiarata.
 7. Verifica che non siano state esportate regioni inattese o non supportate.
-8. Assegna la tecnologia in TpaCAD ed esegui la normale simulazione e tutti i
+8. Se hai abilitato i fori nativi, controlla SIDE, X, Y, profondità negativa e
+   diametro di ogni W#81; verifica che nessuna geometria solo simile a un foro
+   sia diventata una lavorazione.
+9. Assegna la tecnologia in TpaCAD ed esegui la normale simulazione e tutti i
    controlli di sicurezza della macchina.
 
 Fermati se una dimensione del grezzo, un'assegnazione di faccia, un contorno,

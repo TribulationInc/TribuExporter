@@ -277,10 +277,65 @@ class PlanarProfileIR:
 
 
 @dataclass(frozen=True)
+class HoleIR:
+    """One explicitly enabled native Fusion blind-hole working.
+
+    ``depth_mm`` is the positive distance from the TPA side's local Z=0 plane
+    to the hole endpoint.  The serializer is responsible for emitting it as a
+    negative TPA depth.  Keeping holes separate from PlanarProfileIR prevents a
+    point working from ever participating in contour chaining.
+    """
+
+    hole_id: str
+    center: Vec2
+    depth_mm: float
+    diameter_mm: float
+    machining_side: int | MachiningSide
+    source_feature_id: str
+    source_entry_face_id: str
+    feature_depth_mm: float
+    entry_local_z_mm: float = 0.0
+    provenance: str = "fusion_native_hole_feature"
+
+    def validate(self) -> None:
+        for name, value in (
+            ("center.x", self.center.x),
+            ("center.y", self.center.y),
+            ("depth_mm", self.depth_mm),
+            ("diameter_mm", self.diameter_mm),
+            ("feature_depth_mm", self.feature_depth_mm),
+            ("entry_local_z_mm", self.entry_local_z_mm),
+        ):
+            if not math.isfinite(value):
+                raise ValueError(f"Hole '{self.hole_id}' {name} must be finite")
+        if self.depth_mm <= 0 or self.feature_depth_mm <= 0:
+            raise ValueError(f"Hole '{self.hole_id}' depth must be > 0")
+        if self.diameter_mm <= 0:
+            raise ValueError(f"Hole '{self.hole_id}' diameter must be > 0")
+        if not self.source_feature_id:
+            raise ValueError(f"Hole '{self.hole_id}' has no Fusion HoleFeature ID")
+        if not self.source_entry_face_id:
+            raise ValueError(f"Hole '{self.hole_id}' has no entry BRepFace ID")
+        if self.provenance != "fusion_native_hole_feature":
+            raise ValueError(
+                f"Hole '{self.hole_id}' is not owned by a native Fusion HoleFeature"
+            )
+
+
+@dataclass(frozen=True)
 class UnsupportedRegionIR:
     reason: str
     source_face_ids: tuple[str, ...] = ()
     z_mm: float | None = None
+    diagnostics: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class UnsupportedHoleIR:
+    """A native Fusion HoleFeature deliberately not translated to W#81."""
+
+    reason: str
+    source_feature_id: str
     diagnostics: tuple[str, ...] = ()
 
 
@@ -308,6 +363,8 @@ class PanelIR:
     machining_frames: list[MachiningFrameIR] = field(default_factory=list)
     face_facts: list[FaceFactIR] = field(default_factory=list)
     face_ownership: list[FaceOwnershipIR] = field(default_factory=list)
+    holes: list[HoleIR] = field(default_factory=list)
+    unsupported_holes: list[UnsupportedHoleIR] = field(default_factory=list)
     explicit_stock_width: float | None = None
     explicit_stock_height: float | None = None
     comment: str = "TRIBU Fusion geometry export V1"
@@ -366,6 +423,9 @@ class PanelIR:
             raise ValueError("A source BRep face received more than one ownership state")
         if self.face_facts and set(fact_ids) != set(ownership_ids):
             raise ValueError("Every inventoried BRep face must receive one ownership state")
+        hole_ids = [hole.hole_id for hole in self.holes]
+        if len(hole_ids) != len(set(hole_ids)):
+            raise ValueError("Every exported native hole must have a unique hole_id")
         if self.stock_width + EPS_MM < self.required_stock_width:
             raise ValueError("Explicit stock width is smaller than required footprint")
         if self.stock_height + EPS_MM < self.required_stock_height:
@@ -403,6 +463,18 @@ class PanelIR:
                     raise ValueError(
                         f"Extracted profile '{profile.profile_id}' is not owned by "
                         "an exposed face on the same TPA side"
+                    )
+            for hole in self.holes:
+                if hole.source_entry_face_id not in set(fact_ids):
+                    raise ValueError(
+                        f"Hole '{hole.hole_id}' references an uninventoried entry face"
+                    )
+                ownership = owner_by_id[hole.source_entry_face_id]
+                if (ownership.state != OwnershipState.EXPOSED or
+                        ownership.machining_side != hole.machining_side):
+                    raise ValueError(
+                        f"Hole '{hole.hole_id}' entry face is not exposed on the "
+                        "same TPA side"
                     )
 
         for profile in self.profiles:
@@ -462,6 +534,54 @@ class PanelIR:
                             f"[{y_min:.12f}, {y_max:.12f}] "
                             f"(TCN [{qy_min:.4f}, {qy_max:.4f}])"
                         )
+
+        for hole in self.holes:
+            hole.validate()
+            side_number = int(hole.machining_side)
+            if side_number == MachiningSide.SIDE1:
+                x_limit, y_limit, depth_limit = (
+                    self.stock_width, self.stock_height, self.thickness,
+                )
+            elif side_number in (MachiningSide.SIDE3, MachiningSide.SIDE5):
+                x_limit, y_limit, depth_limit = (
+                    self.stock_width, self.thickness, self.stock_height,
+                )
+            elif side_number in (MachiningSide.SIDE4, MachiningSide.SIDE6):
+                x_limit, y_limit, depth_limit = (
+                    self.stock_height, self.thickness, self.stock_width,
+                )
+            elif 7 <= side_number <= 99:
+                machining_frame = frame_by_side.get(side_number)
+                if (machining_frame is None or
+                        machining_frame.kind != MachiningFrameKind.FICTIVE_FACE):
+                    raise ValueError(
+                        f"Hole '{hole.hole_id}' on SIDE{side_number} has no "
+                        "fictive machining frame"
+                    )
+                x_limit = machining_frame.length_mm
+                y_limit = machining_frame.height_mm
+                depth_limit = machining_frame.thickness_mm
+            else:
+                raise ValueError(
+                    f"Hole '{hole.hole_id}' uses unsupported SIDE{side_number}"
+                )
+            qx = tcn_quantized(hole.center.x)
+            qy = tcn_quantized(hole.center.y)
+            if not 0.0 <= qx <= tcn_quantized(x_limit):
+                raise ValueError(
+                    f"Hole '{hole.hole_id}' X={hole.center.x:.12f} is outside "
+                    f"SIDE{side_number} [0, {x_limit:.12f}]"
+                )
+            if not 0.0 <= qy <= tcn_quantized(y_limit):
+                raise ValueError(
+                    f"Hole '{hole.hole_id}' Y={hole.center.y:.12f} is outside "
+                    f"SIDE{side_number} [0, {y_limit:.12f}]"
+                )
+            if tcn_quantized(hole.depth_mm) > tcn_quantized(depth_limit):
+                raise ValueError(
+                    f"Hole '{hole.hole_id}' depth {hole.depth_mm:.6f} exceeds "
+                    f"SIDE{side_number} thickness {depth_limit:.6f}"
+                )
 
 
 def profile_sort_key(profile: PlanarProfileIR) -> tuple:

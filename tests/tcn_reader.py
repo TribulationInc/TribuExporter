@@ -26,6 +26,28 @@ class SemanticFictiveFace:
     thickness: float
 
 
+@dataclass
+class SemanticHole:
+    side: int
+    values: dict[int, float]
+
+
+def read_holes(text: str) -> list[SemanticHole]:
+    holes = []
+    active_side = None
+    for line in text.splitlines():
+        side_match = re.fullmatch(r"SIDE#(\d+)\{", line)
+        if side_match:
+            active_side = int(side_match.group(1))
+        if line.startswith("W#81"):
+            values = {
+                int(number): float(value)
+                for number, value in PARAMETER.findall(line)
+            }
+            holes.append(SemanticHole(active_side, values))
+    return holes
+
+
 def read_fictive_faces(text: str) -> list[SemanticFictiveFace]:
     faces = []
     active_side = None
@@ -70,6 +92,8 @@ def read_tcn(text: str) -> tuple[dict[str, float], list[SemanticProfile]]:
             active_side = int(side_match.group(1))
             active = None
         if not line.startswith("W#"):
+            continue
+        if line.startswith("W#81"):
             continue
         values = {int(number): float(value) for number, value in PARAMETER.findall(line)}
         operation = "L01" if line.startswith("W#2201") else "A01"

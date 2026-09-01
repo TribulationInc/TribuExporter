@@ -8,7 +8,8 @@ is already represented in the final BRep body.
 
 The exporter creates selectable geometry. TpaCAD remains responsible for
 setups, tools, compensation, depth passes, entry and exit, sequencing, and all
-other CAM decisions.
+other CAM decisions. Native simple blind holes are one explicit, disabled-by-
+default exception: when enabled, they are emitted as TPA hole workings.
 
 ## Before exporting
 
@@ -76,6 +77,45 @@ selected deeper SIDE1 profile owns the same complete XY boundary. It affects
 only TCN output. It never changes the geometry model or removes the mandatory
 finished outer contour.
 
+### Native Fusion blind holes
+
+**Export native Fusion simple blind holes (W#81 CAM)** is off by default. When
+enabled, the exporter scans only native `HoleFeature` timeline objects that
+modify the selected body. A hole-looking cylinder, imported body, DXF circle,
+extruded cut, or ordinary BRep face is not inferred as a hole.
+
+The first supported case is an untapped, simple, distance-defined blind hole.
+Its modelled entry BRep face determines the real or selected fictive TPA side;
+the center is transformed into that side's local XY coordinates, and depth is
+written as negative inward Z. Through All, counterbore, countersink, tapped,
+clearance, ambiguous-entry, SIDE2, and otherwise unsupported HoleFeatures are
+reported and omitted.
+
+This option writes executable TPA `W#81` point workings. It specifies diameter,
+but deliberately emits no `#205` tool choice. Always verify SIDE, center,
+diameter, and negative depth in TpaCAD before machine execution. The checkbox
+state is saved on the Fusion body after a successful export.
+
+#### Repeated holes: use a sketch-point pattern
+
+Do not pattern the completed HoleFeature with Fusion's Rectangular, Circular,
+or Path Pattern feature when W#81 export is required. Fusion keeps the original
+hole as the only native HoleFeature and represents the copies as PatternFeature
+elements. TribuExporter deliberately does not expand those copies into hole
+workings.
+
+Instead:
+
+1. Create the hole-position sketch point.
+2. Pattern the sketch point or points in the sketch.
+3. Create one native HoleFeature using all resulting sketch points.
+
+TribuExporter reads every position owned by that native HoleFeature and can
+emit one W#81 working per point. Boundaries produced by an unsupported feature
+pattern are still ordinary final-body BRep geometry, so some may appear in the
+optional profile checklist—often on a lateral face. Leave those profiles
+unchecked when they are not intended as contour geometry.
+
 ## Choose profiles
 
 After SIDE1, P0, PX, and PY are complete, the **Profiles to export** checklist
@@ -124,7 +164,9 @@ Before creating executable CAM:
 5. Verify every geometric Z/depth.
 6. Inspect linearized curves at the declared tolerance.
 7. Confirm no unexpected or unsupported region was exported.
-8. Apply technology in TpaCAD and run the normal machine-side simulation and
+8. If native holes were enabled, verify every W#81 SIDE, X, Y, negative depth,
+   and diameter; confirm no unwanted hole-looking geometry became a working.
+9. Apply technology in TpaCAD and run the normal machine-side simulation and
    safety checks.
 
 Stop if any stock dimension, side assignment, contour, depth, or orientation
