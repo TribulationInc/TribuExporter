@@ -3,6 +3,7 @@ import unittest
 from tribu_exporter.model import (
     Arc2D, CurveChain2D, Line2D, PanelIR, PlanarProfileIR,
     MachiningSide, ProfileZMode, StockAllowance, Vec2,
+    profile_selection_key,
 )
 from tribu_exporter.tcn import TcnGeometryWriter
 from tests.tcn_reader import read_tcn
@@ -41,7 +42,7 @@ class TcnTests(unittest.TestCase):
         self.assertEqual(len(profiles[0].operations), 2)
 
     def test_lateral_profile_is_written_in_real_side_block(self):
-        a, b, c, d = Vec2(10, -18), Vec2(40, -18), Vec2(40, 0), Vec2(10, 0)
+        a, b, c, d = Vec2(10, 0), Vec2(40, 0), Vec2(40, 18), Vec2(10, 18)
         chain = CurveChain2D([
             Line2D(a, b), Line2D(b, c), Line2D(c, d), Line2D(d, a),
         ], True, name="side6_joint")
@@ -54,7 +55,7 @@ class TcnTests(unittest.TestCase):
         _, profiles = read_tcn(TcnGeometryWriter().render(panel))
         self.assertEqual(len(profiles), 1)
         self.assertEqual(profiles[0].side, 6)
-        self.assertEqual(profiles[0].initial, (10, -18, -5))
+        self.assertEqual(profiles[0].initial, (10, 0, -5))
 
     def test_setup_controlled_outer_profile_omits_all_z_fields(self):
         points = [Vec2(0, 0), Vec2(100, 0), Vec2(100, 50), Vec2(0, 50)]
@@ -133,6 +134,115 @@ class TcnTests(unittest.TestCase):
         self.assertEqual(len(profiles), 2)
         self.assertEqual([item.initial[2] for item in profiles], [-1, -2])
         self.assertEqual(text.count("#8121="), 2)
+
+    def test_optional_serializer_filter_suppresses_only_matching_side1_z0_inner(self):
+        points = [Vec2(20, 20), Vec2(80, 20), Vec2(80, 50), Vec2(20, 50)]
+
+        def chain(name):
+            return CurveChain2D([
+                Line2D(points[i], points[(i + 1) % 4]) for i in range(4)
+            ], True, name=name)
+
+        # Deliberately use the same XY chain as the deeper profile: the
+        # mandatory outer contour is still never eligible for suppression.
+        silhouette = chain("body_silhouette_outer")
+        panel = PanelIR(100, 70, 18, StockAllowance(), [
+            PlanarProfileIR(
+                silhouette, 0, profile_id="body_silhouette_outer",
+                provenance="body_silhouette_outer",
+                z_mode=ProfileZMode.UNSPECIFIED,
+            ),
+            PlanarProfileIR(
+                chain("top-t"), 0, profile_id="top-t",
+                provenance="side1_inner",
+            ),
+            PlanarProfileIR(
+                chain("floor-t"), -2, profile_id="floor-t",
+                provenance="fusion_face_boundary",
+            ),
+        ])
+        writer = TcnGeometryWriter(suppress_side1_z0_duplicates=True)
+        pairs = writer.z0_duplicate_pairs(panel)
+        self.assertEqual([(a.profile_id, b.profile_id) for a, b in pairs], [
+            ("top-t", "floor-t"),
+        ])
+        _, profiles = read_tcn(writer.render(panel))
+        self.assertEqual([profile.initial[2] for profile in profiles], [None, -2])
+
+    def test_optional_filter_does_not_suppress_a_nonidentical_z0_loop(self):
+        top = CurveChain2D([
+            Line2D(Vec2(0, 0), Vec2(10, 0)),
+            Line2D(Vec2(10, 0), Vec2(10, 10)),
+            Line2D(Vec2(10, 10), Vec2(0, 10)),
+            Line2D(Vec2(0, 10), Vec2(0, 0)),
+        ], True, name="top")
+        deeper = CurveChain2D([
+            Line2D(Vec2(0, 0), Vec2(11, 0)),
+            Line2D(Vec2(11, 0), Vec2(11, 10)),
+            Line2D(Vec2(11, 10), Vec2(0, 10)),
+            Line2D(Vec2(0, 10), Vec2(0, 0)),
+        ], True, name="deeper")
+        panel = PanelIR(20, 20, 18, StockAllowance(), [
+            PlanarProfileIR(top, 0, profile_id="top", provenance="side1_inner"),
+            PlanarProfileIR(
+                deeper, -2, profile_id="deeper",
+                provenance="fusion_face_boundary",
+            ),
+        ])
+        writer = TcnGeometryWriter(suppress_side1_z0_duplicates=True)
+        self.assertEqual(writer.z0_duplicate_pairs(panel), [])
+        _, profiles = read_tcn(writer.render(panel))
+        self.assertEqual(len(profiles), 2)
+
+    def test_operator_selection_keeps_mandatory_outer_and_selected_profile_only(self):
+        outer = CurveChain2D([
+            Line2D(Vec2(0, 0), Vec2(100, 0)),
+            Line2D(Vec2(100, 0), Vec2(100, 50)),
+            Line2D(Vec2(100, 50), Vec2(0, 50)),
+            Line2D(Vec2(0, 50), Vec2(0, 0)),
+        ], True, name="outer")
+        side3 = CurveChain2D([
+            Line2D(Vec2(0, 0), Vec2(100, 0)),
+            Line2D(Vec2(100, 0), Vec2(100, 18)),
+            Line2D(Vec2(100, 18), Vec2(0, 18)),
+            Line2D(Vec2(0, 18), Vec2(0, 0)),
+        ], True, name="side3")
+        side5 = CurveChain2D(list(side3.segments), True, name="side5")
+        panel = PanelIR(100, 50, 18, StockAllowance(), [
+            PlanarProfileIR(
+                outer, 0, provenance="body_silhouette_outer",
+                z_mode=ProfileZMode.UNSPECIFIED,
+            ),
+            PlanarProfileIR(side3, 0, machining_side=MachiningSide.SIDE3),
+            PlanarProfileIR(side5, 0, machining_side=MachiningSide.SIDE5),
+        ])
+        selected = {profile_selection_key(panel, panel.profiles[1])}
+        writer = TcnGeometryWriter(selected_profile_keys=selected)
+        _, profiles = read_tcn(writer.render(panel))
+        self.assertEqual([profile.side for profile in profiles], [1, 3])
+
+    def test_z0_filter_never_suppresses_selected_top_when_deeper_is_unchecked(self):
+        points = [Vec2(10, 10), Vec2(40, 10), Vec2(40, 30), Vec2(10, 30)]
+
+        def chain(name):
+            return CurveChain2D([
+                Line2D(points[i], points[(i + 1) % 4]) for i in range(4)
+            ], True, name=name)
+
+        top = PlanarProfileIR(
+            chain("top"), 0, provenance="side1_inner",
+        )
+        deeper = PlanarProfileIR(
+            chain("deeper"), -2, provenance="fusion_face_boundary",
+        )
+        panel = PanelIR(50, 40, 18, StockAllowance(), [top, deeper])
+        writer = TcnGeometryWriter(
+            suppress_side1_z0_duplicates=True,
+            selected_profile_keys={profile_selection_key(panel, top)},
+        )
+        self.assertEqual(writer.z0_duplicate_pairs(panel), [])
+        _, profiles = read_tcn(writer.render(panel))
+        self.assertEqual([profile.initial[2] for profile in profiles], [0])
 
 
 if __name__ == "__main__":

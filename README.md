@@ -78,8 +78,13 @@ The project is under active development, but the following concepts have already
 - independent profiles at different geometric Z levels;
 - selected SIDE1 inner loops without duplicating the selected top face's outer
   reference boundary;
+- optional TCN-only suppression of a SIDE1 Z=0 inner loop when its complete XY
+  boundary is identical to a deeper SIDE1 profile;
 - face-owned recessed profiles: each exposed Fusion surface is emitted from
   only its own boundary loops and retains its source-face identity;
+- operator-controlled profile export: every detected optional profile has a
+  checkbox, lateral profiles default off, and per-body choices persist in the
+  Fusion document;
 - separate later assignment of TpaCAD technology to those profiles.
 
 A typical validated example is a loudspeaker baffle containing:
@@ -204,8 +209,16 @@ This project deals with CNC machinery. Never assume that a geometrically valid f
 5. Use **Utilities → Export TpaCAD Geometry**.
 
 The command asks for SIDE#1, P0, PX and PY, stock allowance and the explicit
-curve chordal tolerance. It presents a geometric report before allowing a file
-to be written. Unsupported regions require an explicit decision to continue.
+curve chordal tolerance. Once the frame is complete it scans the body and
+shows optional profile checkboxes grouped by their SIDE-prefixed labels.
+SIDE1 candidates default on; SIDE3-SIDE6 candidates default off until the
+operator explicitly requests them. The mandatory finished outer contour is
+locked on. Choices and numeric export settings are stored as a small attribute
+on the selected Fusion body after a successful export. A visible checkbox can
+also suppress a SIDE1 Z=0 inner loop only when an identical selected deeper
+SIDE1 loop will be written. The command presents a geometric report before
+allowing a file to be written.
+Unsupported regions require an explicit decision to continue.
 
 See [Architecture](docs/ARCHITECTURE.md) and [Testing](docs/TESTING.md) before
 using output in a production workflow.

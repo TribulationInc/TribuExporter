@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum, IntEnum
+import hashlib
 import math
 from typing import Iterable, Sequence
 
@@ -367,10 +368,10 @@ class PanelIR:
                 x_limit, y_min, y_max = self.stock_width, 0.0, self.stock_height
                 depth_min = -self.thickness
             elif profile.machining_side in (MachiningSide.SIDE3, MachiningSide.SIDE5):
-                x_limit, y_min, y_max = self.stock_width, -self.thickness, 0.0
+                x_limit, y_min, y_max = self.stock_width, 0.0, self.thickness
                 depth_min = -self.stock_height
             else:
-                x_limit, y_min, y_max = self.stock_height, -self.thickness, 0.0
+                x_limit, y_min, y_max = self.stock_height, 0.0, self.thickness
                 depth_min = -self.stock_width
             if profile.z_mm < depth_min - EPS_MM:
                 raise ValueError(
@@ -424,18 +425,24 @@ def panel_to_side_coordinates(
     zp: float,
     stock_width: float,
     stock_height: float,
+    stock_thickness: float,
 ) -> tuple[Vec2, float]:
-    """Apply the public panel-space → TPA-side-space coordinate contract."""
+    """Apply the panel-space → real TPA-side coordinate contract.
+
+    Panel Z is top-relative (top=0, bottom=-DS), whereas TpaCAD lateral-face Y
+    is absolute through the piece thickness (bottom=0, top=DS).
+    """
     if side == MachiningSide.SIDE1:
         return Vec2(xp, yp), zp
+    z_abs = zp + stock_thickness
     if side == MachiningSide.SIDE3:
-        return Vec2(xp, zp), -yp
+        return Vec2(xp, z_abs), -yp
     if side == MachiningSide.SIDE5:
-        return Vec2(xp, zp), yp - stock_height
+        return Vec2(xp, z_abs), yp - stock_height
     if side == MachiningSide.SIDE4:
-        return Vec2(yp, zp), xp - stock_width
+        return Vec2(yp, z_abs), xp - stock_width
     if side == MachiningSide.SIDE6:
-        return Vec2(yp, zp), -xp
+        return Vec2(yp, z_abs), -xp
     raise ValueError(f"Unsupported TPA machining side: {side}")
 
 
@@ -503,3 +510,65 @@ def chain_signature(
                 reverse.clockwise, reverse.full_circle,
             ))
     return min(forward + list(rotations(reversed_tokens)))
+
+
+def profile_selection_key(panel: PanelIR, profile: PlanarProfileIR) -> str:
+    """Return a stock-allowance-independent key for operator export choices.
+
+    Fusion ``tempId`` values are intentionally absent: they can change after a
+    document is reopened.  The key describes the complete TPA-side geometry in
+    finished-part coordinates, including side and access depth.  Changing the
+    actual geometry therefore creates a new candidate instead of silently
+    reusing an obsolete manufacturing choice.
+    """
+    if profile.provenance == "body_silhouette_outer":
+        return "v1:FINAL_OUTER_CONTOUR"
+
+    side = profile.machining_side
+    if side == MachiningSide.SIDE1:
+        dx = -panel.allowance.x_minus
+        dy = -panel.allowance.y_minus
+        depth = profile.z_mm
+    elif side == MachiningSide.SIDE3:
+        dx = -panel.allowance.x_minus
+        dy = 0.0
+        depth = profile.z_mm + panel.allowance.y_minus
+    elif side == MachiningSide.SIDE5:
+        dx = -panel.allowance.x_minus
+        dy = 0.0
+        depth = profile.z_mm + panel.allowance.y_plus
+    elif side == MachiningSide.SIDE4:
+        dx = -panel.allowance.y_minus
+        dy = 0.0
+        depth = profile.z_mm + panel.allowance.x_plus
+    elif side == MachiningSide.SIDE6:
+        dx = -panel.allowance.y_minus
+        dy = 0.0
+        depth = profile.z_mm + panel.allowance.x_minus
+    else:
+        raise ValueError(f"Unsupported profile side: {side}")
+
+    translated = []
+    for segment in profile.chain.segments:
+        start = Vec2(segment.start.x + dx, segment.start.y + dy)
+        end = Vec2(segment.end.x + dx, segment.end.y + dy)
+        if isinstance(segment, Line2D):
+            translated.append(Line2D(start, end))
+        else:
+            translated.append(Arc2D(
+                start, end,
+                Vec2(segment.center.x + dx, segment.center.y + dy),
+                segment.clockwise, segment.full_circle,
+            ))
+    normalized_chain = CurveChain2D(
+        translated, profile.chain.closed, name="selection_fingerprint",
+    )
+    signature = chain_signature(
+        normalized_chain, CONNECTIVITY_TOLERANCE_MM,
+    )
+    digest = hashlib.sha256(repr(signature).encode("ascii")).hexdigest()[:20]
+    depth_token = round(depth / CONNECTIVITY_TOLERANCE_MM)
+    return (
+        f"v1:side={int(side)}:zmode={profile.z_mode.value}:"
+        f"depth={depth_token}:shape={digest}"
+    )

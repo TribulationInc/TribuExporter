@@ -159,13 +159,13 @@ def panel_extents(face, frame: PanelFrame) -> tuple[float, float, float, float, 
 def _point2d(point, frame: PanelFrame, xmin: float, ymin: float,
              expected_depth_mm: float, side: MachiningSide,
              allowance: StockAllowance, stock_width: float,
-             stock_height: float) -> Vec2:
+             stock_height: float, stock_thickness: float) -> Vec2:
     local = frame.model_to_local_cm(_v3_point(point))
     xp = local.x * CM_TO_MM - xmin + allowance.x_minus
     yp = local.y * CM_TO_MM - ymin + allowance.y_minus
     zp = local.z * CM_TO_MM
     projected, depth = panel_to_side_coordinates(
-        side, xp, yp, zp, stock_width, stock_height,
+        side, xp, yp, zp, stock_width, stock_height, stock_thickness,
     )
     if abs(depth - expected_depth_mm) > PLANE_LEVEL_TOLERANCE_MM:
         raise ValueError(
@@ -201,27 +201,28 @@ def coedge_segments(coedge, frame: PanelFrame, xmin: float, ymin: float,
                     depth_mm: float, curve_tolerance_mm: float,
                     side: MachiningSide, allowance: StockAllowance,
                     stock_width: float, stock_height: float,
+                    stock_thickness: float,
                     reverse: bool = False) -> list[Line2D | Arc2D]:
     geometry = coedge.edge.geometry
     endpoints = _edge_endpoints(coedge)
     line = adsk.core.Line3D.cast(geometry)
     if line is not None and endpoints:
         result = [Line2D(
-            _point2d(endpoints[0], frame, xmin, ymin, depth_mm, side, allowance, stock_width, stock_height),
-            _point2d(endpoints[1], frame, xmin, ymin, depth_mm, side, allowance, stock_width, stock_height),
+            _point2d(endpoints[0], frame, xmin, ymin, depth_mm, side, allowance, stock_width, stock_height, stock_thickness),
+            _point2d(endpoints[1], frame, xmin, ymin, depth_mm, side, allowance, stock_width, stock_height, stock_thickness),
         )]
     else:
         arc = adsk.core.Arc3D.cast(geometry)
         circle = adsk.core.Circle3D.cast(geometry)
         if arc is not None and endpoints:
             result = [Arc2D(
-                _point2d(endpoints[0], frame, xmin, ymin, depth_mm, side, allowance, stock_width, stock_height),
-                _point2d(endpoints[1], frame, xmin, ymin, depth_mm, side, allowance, stock_width, stock_height),
-                _point2d(arc.center, frame, xmin, ymin, depth_mm, side, allowance, stock_width, stock_height),
+                _point2d(endpoints[0], frame, xmin, ymin, depth_mm, side, allowance, stock_width, stock_height, stock_thickness),
+                _point2d(endpoints[1], frame, xmin, ymin, depth_mm, side, allowance, stock_width, stock_height, stock_thickness),
+                _point2d(arc.center, frame, xmin, ymin, depth_mm, side, allowance, stock_width, stock_height, stock_thickness),
                 _clockwise(arc.normal, coedge, frame, side),
             )]
         elif circle is not None:
-            center = _point2d(circle.center, frame, xmin, ymin, depth_mm, side, allowance, stock_width, stock_height)
+            center = _point2d(circle.center, frame, xmin, ymin, depth_mm, side, allowance, stock_width, stock_height, stock_thickness)
             start = Vec2(center.x + circle.radius * CM_TO_MM, center.y)
             result = [Arc2D(start, start, center,
                             _clockwise(circle.normal, coedge, frame, side), True)]
@@ -242,7 +243,7 @@ def coedge_segments(coedge, frame: PanelFrame, xmin: float, ymin: float,
                 ordered.reverse()
             if endpoints:
                 ordered[0], ordered[-1] = endpoints
-            points_2d = [_point2d(p, frame, xmin, ymin, depth_mm, side, allowance, stock_width, stock_height) for p in ordered]
+            points_2d = [_point2d(p, frame, xmin, ymin, depth_mm, side, allowance, stock_width, stock_height, stock_thickness) for p in ordered]
             result = [Line2D(a, b) for a, b in zip(points_2d, points_2d[1:])
                       if a.distance_to(b) > 1e-9]
             if not result:
@@ -253,7 +254,7 @@ def coedge_segments(coedge, frame: PanelFrame, xmin: float, ymin: float,
 def loop_chain(loop, frame: PanelFrame, xmin: float, ymin: float, z_mm: float,
                tolerance_mm: float, name: str, side: MachiningSide,
                allowance: StockAllowance, stock_width: float,
-               stock_height: float) -> CurveChain2D:
+               stock_height: float, stock_thickness: float) -> CurveChain2D:
     segments = []
     source_ids = []
     for index in range(loop.coEdges.count):
@@ -261,7 +262,7 @@ def loop_chain(loop, frame: PanelFrame, xmin: float, ymin: float, z_mm: float,
         source_ids.append(_native_id(coedge.edge))
         segments.extend(coedge_segments(
             coedge, frame, xmin, ymin, z_mm, tolerance_mm, side, allowance,
-            stock_width, stock_height,
+            stock_width, stock_height, stock_thickness,
         ))
     chain = CurveChain2D(segments, True, tuple(source_ids), name)
     chain.validate()
@@ -311,12 +312,13 @@ def _face_plane(face, frame: PanelFrame, xmin: float, ymin: float) -> GeometricP
 
 def _face_depth(face, side: MachiningSide, frame: PanelFrame, xmin: float,
                 ymin: float, allowance: StockAllowance, stock_width: float,
-                stock_height: float) -> float:
+                stock_height: float, stock_thickness: float) -> float:
     local = frame.model_to_local_cm(_v3_point(face.centroid))
     xp = local.x * CM_TO_MM - xmin + allowance.x_minus
     yp = local.y * CM_TO_MM - ymin + allowance.y_minus
     _, depth = panel_to_side_coordinates(
         side, xp, yp, local.z * CM_TO_MM, stock_width, stock_height,
+        stock_thickness,
     )
     return depth
 
@@ -353,12 +355,14 @@ def _side_outward_axis(side: MachiningSide, frame: PanelFrame) -> V3:
 
 def _point_side_depth(point, side: MachiningSide, frame: PanelFrame,
                       xmin: float, ymin: float, allowance: StockAllowance,
-                      stock_width: float, stock_height: float) -> float:
+                      stock_width: float, stock_height: float,
+                      stock_thickness: float) -> float:
     local = frame.model_to_local_cm(_v3_point(point))
     xp = local.x * CM_TO_MM - xmin + allowance.x_minus
     yp = local.y * CM_TO_MM - ymin + allowance.y_minus
     _, depth = panel_to_side_coordinates(
         side, xp, yp, local.z * CM_TO_MM, stock_width, stock_height,
+        stock_thickness,
     )
     return depth
 
@@ -367,6 +371,7 @@ def _directional_first_hit_is_face(
         candidate, frame: PanelFrame, side: MachiningSide,
         candidate_depth_mm: float, xmin: float, ymin: float,
         allowance: StockAllowance, stock_width: float, stock_height: float,
+        stock_thickness: float,
         clearance_mm: float) -> tuple[bool, tuple[str, ...]]:
     """Prove access by requiring the exact face to be first on its body.
 
@@ -411,7 +416,7 @@ def _directional_first_hit_is_face(
         hit_point = hit_points.item(index)
         hit_depth_mm = _point_side_depth(
             hit_point, side, frame, xmin, ymin, allowance,
-            stock_width, stock_height,
+            stock_width, stock_height, stock_thickness,
         )
         hit_v = _v3_point(hit_point)
         travel_cm = (hit_v - origin_v).dot(inward)
@@ -461,22 +466,22 @@ def _real_machining_frames(stock_width: float, stock_height: float,
         ),
         MachiningFrameIR(
             "side3", MachiningFrameKind.REAL_FACE, 3,
-            (0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0),
+            (0.0, 0.0, -thickness), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0),
             (0.0, -1.0, 0.0), stock_width, thickness, stock_height,
         ),
         MachiningFrameIR(
             "side4", MachiningFrameKind.REAL_FACE, 4,
-            (stock_width, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0),
+            (stock_width, 0.0, -thickness), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0),
             (1.0, 0.0, 0.0), stock_height, thickness, stock_width,
         ),
         MachiningFrameIR(
             "side5", MachiningFrameKind.REAL_FACE, 5,
-            (0.0, stock_height, 0.0), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0),
+            (0.0, stock_height, -thickness), (1.0, 0.0, 0.0), (0.0, 0.0, 1.0),
             (0.0, 1.0, 0.0), stock_width, thickness, stock_height,
         ),
         MachiningFrameIR(
             "side6", MachiningFrameKind.REAL_FACE, 6,
-            (0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0),
+            (0.0, 0.0, -thickness), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0),
             (-1.0, 0.0, 0.0), stock_height, thickness, stock_width,
         ),
     ]
@@ -541,11 +546,11 @@ def _inventory_body(face, frame: PanelFrame, xmin: float, ymin: float,
         else:
             depth = _face_depth(
                 candidate, side, frame, xmin, ymin, allowance,
-                stock_width, stock_height,
+                stock_width, stock_height, thickness_mm,
             )
             exposed, evidence = _directional_first_hit_is_face(
                 candidate, frame, side, depth, xmin, ymin, allowance,
-                stock_width, stock_height, clearance_mm,
+                stock_width, stock_height, thickness_mm, clearance_mm,
             )
             state = OwnershipState.EXPOSED if exposed else OwnershipState.COVERED
             owner_side = side if exposed else None
@@ -561,6 +566,7 @@ def _inventory_body(face, frame: PanelFrame, xmin: float, ymin: float,
 def _body_silhouette_chain(face, frame: PanelFrame, xmin: float, ymin: float,
                            tolerance_mm: float, allowance: StockAllowance,
                            stock_width: float, stock_height: float,
+                           stock_thickness: float,
                            logger=None) -> tuple[CurveChain2D, bool]:
     """Project the complete finished body onto SIDE1 and return its outer loop.
 
@@ -605,7 +611,7 @@ def _body_silhouette_chain(face, frame: PanelFrame, xmin: float, ymin: float,
     chain = loop_chain(
         outer_loops[0], frame, xmin, ymin, 0.0, tolerance_mm,
         "body_silhouette_outer", MachiningSide.SIDE1, allowance,
-        stock_width, stock_height,
+        stock_width, stock_height, stock_thickness,
     )
     if logger:
         logger.info(
@@ -641,7 +647,7 @@ def extract_panel_ir(face, frame: PanelFrame, stock_margin_mm: float,
 
     silhouette, silhouette_approximated = _body_silhouette_chain(
         face, frame, xmin, ymin, curve_tolerance_mm, allowance,
-        stock_width, stock_height, logger,
+        stock_width, stock_height, thickness, logger,
     )
     if silhouette_approximated:
         silhouette.diagnostics = (
@@ -676,7 +682,7 @@ def extract_panel_ir(face, frame: PanelFrame, stock_margin_mm: float,
         chain = loop_chain(
             loop, frame, xmin, ymin, 0.0, curve_tolerance_mm,
             f"side1_inner_{inner_index}", MachiningSide.SIDE1,
-            allowance, stock_width, stock_height,
+            allowance, stock_width, stock_height, thickness,
         )
         profiles.append(PlanarProfileIR(
             chain=chain, z_mm=0.0, machining_side=MachiningSide.SIDE1,
@@ -738,7 +744,7 @@ def extract_panel_ir(face, frame: PanelFrame, stock_margin_mm: float,
                 chain = loop_chain(
                     loop, frame, xmin, ymin, depth, curve_tolerance_mm,
                     profile_id, side, allowance,
-                    stock_width, stock_height,
+                    stock_width, stock_height, thickness,
                 )
             except ValueError as error:
                 unsupported.append(UnsupportedRegionIR(

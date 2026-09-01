@@ -10,8 +10,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from .model import (
-    Arc2D, Line2D, PanelIR, PlanarProfileIR, ProfileZMode,
-    profile_sort_key, tcn_quantized,
+    Arc2D, EPS_MM, Line2D, MachiningSide, PanelIR, PlanarProfileIR,
+    ProfileZMode, TCN_DECIMAL_PLACES, chain_signature, profile_sort_key,
+    profile_selection_key, tcn_quantized,
 )
 
 
@@ -23,6 +24,67 @@ def fmt(value: float) -> str:
 
 
 class TcnGeometryWriter:
+    def __init__(self, suppress_side1_z0_duplicates: bool = False,
+                 selected_profile_keys: set[str] | None = None):
+        self.suppress_side1_z0_duplicates = suppress_side1_z0_duplicates
+        self.selected_profile_keys = selected_profile_keys
+
+    def selected_profiles(self, panel: PanelIR) -> list[PlanarProfileIR]:
+        """Apply only explicit export intent; FINAL_OUTER is always retained."""
+        profiles = sorted(panel.profiles, key=profile_sort_key)
+        if self.selected_profile_keys is None:
+            return profiles
+        return [
+            profile for profile in profiles
+            if profile.provenance == "body_silhouette_outer"
+            or profile_selection_key(panel, profile) in self.selected_profile_keys
+        ]
+
+    def z0_duplicate_pairs(
+            self, panel: PanelIR,
+    ) -> list[tuple[PlanarProfileIR, PlanarProfileIR]]:
+        """Return selected-face Z0 loops duplicated by deeper SIDE1 loops.
+
+        This is deliberately a serialization policy. The IR is unchanged, the
+        mandatory finished silhouette is ineligible, and only a complete XY
+        chain match at TCN precision can suppress a selected SIDE1 inner loop.
+        """
+        if not self.suppress_side1_z0_duplicates:
+            return []
+        signature_tolerance = 10 ** -TCN_DECIMAL_PLACES
+        deeper_by_signature: dict[tuple, list[PlanarProfileIR]] = {}
+        candidates = self.selected_profiles(panel)
+        for profile in candidates:
+            if (
+                profile.machining_side == MachiningSide.SIDE1
+                and profile.z_mode == ProfileZMode.EXPLICIT
+                and profile.z_mm < -EPS_MM
+            ):
+                signature = chain_signature(profile.chain, signature_tolerance)
+                deeper_by_signature.setdefault(signature, []).append(profile)
+
+        pairs = []
+        for profile in candidates:
+            if not (
+                profile.machining_side == MachiningSide.SIDE1
+                and profile.z_mode == ProfileZMode.EXPLICIT
+                and abs(profile.z_mm) <= EPS_MM
+                and profile.provenance == "side1_inner"
+            ):
+                continue
+            signature = chain_signature(profile.chain, signature_tolerance)
+            matches = deeper_by_signature.get(signature, ())
+            if matches:
+                pairs.append((profile, matches[0]))
+        return pairs
+
+    def profiles_for_export(self, panel: PanelIR) -> list[PlanarProfileIR]:
+        suppressed = {id(zero) for zero, _ in self.z0_duplicate_pairs(panel)}
+        return [
+            profile for profile in self.selected_profiles(panel)
+            if id(profile) not in suppressed
+        ]
+
     def _line(self, segment: Line2D, z_mm: float, first: bool,
               z_mode: ProfileZMode) -> str:
         fields = ["W#2201{ ::WTl", " #8015=0"]
@@ -92,7 +154,7 @@ class TcnGeometryWriter:
                 f"DH={fmt(panel.stock_height)} DS={fmt(panel.thickness)}"
             ),
         ]
-        profiles = sorted(panel.profiles, key=profile_sort_key)
+        profiles = self.profiles_for_export(panel)
         for side_number in range(1, 7):
             output.append(f"SIDE#{side_number}{{")
             for profile in profiles:

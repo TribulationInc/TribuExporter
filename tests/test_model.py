@@ -2,7 +2,8 @@ import unittest
 
 from tribu_exporter.model import (
     Arc2D, CurveChain2D, Line2D, PanelIR, PlanarProfileIR,
-    StockAllowance, Vec2, chain_signature, profile_sort_key,
+    MachiningSide, StockAllowance, Vec2, chain_signature, profile_sort_key,
+    profile_selection_key,
     same_geometric_depth,
 )
 
@@ -122,6 +123,37 @@ class ModelTests(unittest.TestCase):
         )
         profile.validate()
         self.assertIsNone(profile.source_face_id)
+
+    def test_profile_selection_key_does_not_change_with_stock_allowance(self):
+        no_margin = PanelIR(100, 50, 18, StockAllowance())
+        with_margin = PanelIR(100, 50, 18, StockAllowance(5, 5, 5, 5))
+        source = PlanarProfileIR(
+            rectangle("side6", 10, 0, 40, 18), 0,
+            machining_side=MachiningSide.SIDE6,
+        )
+        shifted = PlanarProfileIR(
+            rectangle("side6", 15, 0, 45, 18), -5,
+            machining_side=MachiningSide.SIDE6,
+        )
+        self.assertEqual(
+            profile_selection_key(no_margin, source),
+            profile_selection_key(with_margin, shifted),
+        )
+
+    def test_profile_selection_key_distinguishes_side_and_depth(self):
+        panel = PanelIR(100, 50, 18, StockAllowance())
+        chain = rectangle("region", 10, 0, 40, 18)
+        side3 = PlanarProfileIR(chain, 0, machining_side=MachiningSide.SIDE3)
+        side5 = PlanarProfileIR(chain, 0, machining_side=MachiningSide.SIDE5)
+        deeper = PlanarProfileIR(chain, -1, machining_side=MachiningSide.SIDE3)
+        self.assertNotEqual(
+            profile_selection_key(panel, side3),
+            profile_selection_key(panel, side5),
+        )
+        self.assertNotEqual(
+            profile_selection_key(panel, side3),
+            profile_selection_key(panel, deeper),
+        )
 
 
 if __name__ == "__main__":

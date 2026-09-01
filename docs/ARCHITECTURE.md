@@ -24,6 +24,12 @@ SIDE#1 is `Z=0`. Every profile explicitly records its machining side and its
 geometric source plane. TPA-side assignment is an access-direction decision,
 not a Z-level decision.
 
+Panel Z is top-relative: the top is `zp=0` and the bottom is `zp=-DS`.
+TpaCAD's ordinary lateral faces instead use absolute thickness as their local
+Y coordinate, so `Ys=zp+DS`: bottom is `Y=0`, top is `Y=DS`. SIDE3/SIDE5 use
+`Xs=xp`; SIDE4/SIDE6 use `Xs=yp`. Local profile Z remains the negative inward
+depth from the assigned stock side.
+
 Fusion's fixed-direction oriented bounding box of the complete finished body
 supplies spline-safe directional extrema. SIDE1 prescribes the orientation but
 does not restrict the footprint: a rebate or stepped level may extend beyond
@@ -126,6 +132,38 @@ CAM treatment to each one.
 A fictive face is a machining coordinate system, not a separator for two
 profiles that already belong on the same real face. It is not introduced merely
 to resolve coincident boundaries.
+
+### Operator export selection
+
+Exposure proves that a face *can* be worked from a TPA side; it does not prove
+that the operator wants that geometry in this program. Extraction therefore
+always builds the complete geometry IR first, after which a separate selection
+policy decides which profiles reach the serializer. The mandatory whole-body
+silhouette cannot be disabled. New SIDE1 candidates default enabled and new
+lateral candidates default disabled.
+
+Each choice is keyed by side, normalized access depth and the complete closed
+curve signature in finished-part coordinates. The key excludes Fusion
+`tempId` values and stock allowance, so it survives a document reopen and a
+change of raw-stock margin. Changed or newly discovered geometry does not
+silently inherit an unrelated lateral machining choice. The known/selected key
+sets and numeric command settings are stored in a namespaced Fusion body
+attribute only after a successful export. This selection layer neither removes
+profiles from the IR nor changes endpoints, curves, side assignment or depth.
+
+### Optional Z0 duplicate serialization filter
+
+The Fusion-derived IR retains selected SIDE1 inner loops even when a deeper
+SIDE1 face has the same complete XY boundary. A visible export checkbox may
+suppress that redundant Z0 loop only while writing TCN. Matching is performed
+on the complete closed chain at TCN coordinate precision; partial overlap does
+not qualify. The deeper profile remains unchanged at its geometric Z.
+
+This policy never changes the IR, never suppresses lateral profiles, and never
+applies to the mandatory `body_silhouette_outer`. TpaCAD construct geometry is
+not used as a substitute: construct elements remain programmed geometry and can
+still participate in profile tooling even though they are excluded from piece
+execution.
 
 ## Real and future fictive machining frames
 
