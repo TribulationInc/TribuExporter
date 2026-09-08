@@ -16,6 +16,7 @@ Thumbs.db
 # Runtime and generated output
 *.log
 *.tcn
+*.tribupath
 exports/
 generated/
 local-reference-paths.*
@@ -28,4 +29,3 @@ Samples/
 machine-macros/
 private-programs/
 proprietary/
-

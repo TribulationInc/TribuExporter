@@ -33,17 +33,21 @@ def run(context):
         # Fusion keeps imported modules alive after an add-in is stopped. Reload
         # dependencies in order so a normal Stop → Run cycle uses current files.
         import importlib
-        from tribu_exporter import model, tcn, fusion_extract, addin
-        for module in (model, tcn, fusion_extract, addin):
+        from tribu_exporter import (
+            model, tcn, cam_export, cam_addin, fusion_extract, addin,
+        )
+        for module in (model, tcn, cam_export, cam_addin, fusion_extract, addin):
             importlib.reload(module)
         addin.run(context)
+        cam_addin.run(context)
     except BaseException:
         _report_bootstrap_failure("start")
 
 
 def stop(context):
     try:
-        from tribu_exporter import addin
+        from tribu_exporter import addin, cam_addin
+        cam_addin.stop(context)
         addin.stop(context)
     except BaseException:
         _report_bootstrap_failure("stop")

@@ -7,12 +7,22 @@ import logging
 from pathlib import Path
 import re
 import tempfile
+import time
 import traceback
 from collections import Counter
 
 import adsk.core
 import adsk.fusion
 
+from .cam_addin import (
+    add_cam_option_inputs, available_cam_operations, cam_options_from_inputs,
+    operation_label, operation_problem, operation_smoothing_info, post_operation,
+    reset_cam_option_inputs,
+)
+from .cam_export import (
+    PostedArcXY, append_cam_profile_to_tcn, optimize_toolpath,
+    target_stock_xy_shift, tcn_physical_line_count,
+)
 from .fusion_extract import extract_panel_ir, make_panel_frame
 from .model import (
     MachiningFrameKind, MachiningSide, ProfileZMode, profile_selection_key,
@@ -25,10 +35,12 @@ COMMAND_NAME = "Export TpaCAD Geometry"
 COMMAND_DESCRIPTION = (
     "Export body-derived profiles and optional native blind holes to TCN"
 )
-WORKSPACE_ID = "FusionSolidEnvironment"
-PANEL_ID = "SolidScriptsAddinsPanel"
+TOOLBAR_TARGETS = (
+    ("FusionSolidEnvironment", "SolidScriptsAddinsPanel"),
+    ("CAMEnvironment", "CAMScriptsAddinsPanel"),
+)
 LOG_PATH = Path(tempfile.gettempdir()) / "tribu_tpa_debug.log"
-BUILD_ID = "2026-09-02.17-native-blind-holes"
+BUILD_ID = "2026-09-07.4-configurable-cam-compression"
 ATTRIBUTE_GROUP = "TribuExporterV1"
 PROFILE_SELECTION_ATTRIBUTE = "profile_export_selection"
 
@@ -42,6 +54,7 @@ class CommandState:
         self.preferences: dict = {}
         self.body_runtime_key = None
         self.updating = False
+        self.cam_operations: list = []
 
 
 def get_logger() -> logging.Logger:
@@ -222,6 +235,39 @@ def _selected_profile_keys(inputs, state: CommandState) -> set[str]:
     }
 
 
+def _cam_enabled(inputs) -> bool:
+    return bool(inputs.itemById("export_cam_toolpath").value)
+
+
+def _selected_cam_operation(inputs, state: CommandState):
+    items = inputs.itemById("cam_toolpath").listItems
+    for index in range(min(items.count, len(state.cam_operations))):
+        if items.item(index).isSelected:
+            return state.cam_operations[index]
+    return None
+
+
+def _populate_cam_choices(inputs, state: CommandState) -> None:
+    dropdown = inputs.itemById("cam_toolpath")
+    dropdown.listItems.clear()
+    state.cam_operations = available_cam_operations()
+    for index, operation in enumerate(state.cam_operations):
+        dropdown.listItems.add(operation_label(operation), index == 0)
+    if state.cam_operations:
+        smoothing, warning = operation_smoothing_info(state.cam_operations[0])
+        inputs.itemById("cam_status").text = (
+            f"{len(state.cam_operations)} generated, valid 3D Contour/Parallel "
+            f"operation(s) available.\n{smoothing}"
+            + ("\nWARNING: regenerate with Fusion Fit arcs; redistribute emits "
+               "many linear points." if warning else "")
+        )
+    else:
+        inputs.itemById("cam_status").text = (
+            "No generated, valid, non-suppressed 3D Contour or Parallel "
+            "operation is available."
+        )
+
+
 def _populate_profile_choices(inputs, state: CommandState, panel) -> None:
     dropdown = inputs.itemById("profile_selection")
     old_known = set(state.profile_keys)
@@ -256,7 +302,9 @@ def _populate_profile_choices(inputs, state: CommandState, panel) -> None:
     state.panel = panel
 
 
-def _report(panel, writer: TcnGeometryWriter | None = None) -> str:
+def _report(panel, writer: TcnGeometryWriter | None = None,
+            cam_operation=None, cam_result=None, cam_options=None,
+            complete_tcn_lines: int | None = None) -> str:
     writer = writer or TcnGeometryWriter()
     exported_profiles = writer.profiles_for_export(panel)
     suppressed_pairs = writer.z0_duplicate_pairs(panel)
@@ -292,6 +340,51 @@ def _report(panel, writer: TcnGeometryWriter | None = None) -> str:
         f"Native simple blind holes to write: {len(panel.holes)}",
         "",
     ]
+    if cam_result is not None:
+        raw = cam_result.toolpath
+        lower, upper = raw.tpa_bounds()
+        smoothing, smoothing_warning = operation_smoothing_info(cam_operation)
+        lines.extend((
+            "CAM EXPORT ENABLED",
+            f"Selected: {operation_label(cam_operation)}",
+            smoothing,
+            *( ["WARNING: Fusion redistribute/evenly-spaced smoothing is active; Fit arcs can reduce L01 count."]
+               if smoothing_warning else [] ),
+            "Generated and current: yes",
+            f"Post linearization tolerance: {cam_options.post_linearization_tolerance_mm:.6f} mm",
+            f"Fallback arc fitting: {'on' if cam_options.fit_arcs else 'off'}"
+            + (f", tolerance={cam_options.arc_fit_tolerance_mm:.6f} mm"
+               if cam_options.fit_arcs else ""),
+            f"Exact collinear merge: {'on' if cam_options.merge_exact_collinear else 'off'}",
+            f"3D simplification: {'on' if cam_options.simplify_3d else 'off'}"
+            + (f", tolerance={cam_options.simplification_tolerance_mm:.6f} mm"
+               if cam_options.simplify_3d else ""),
+            f"Raw motions: {cam_result.original_motion_count}",
+            f"Raw linear motions: {cam_result.original_linear_count}",
+            f"Raw rapid motions: {cam_result.original_rapid_count}",
+            f"Native Fusion XY arcs: {cam_result.original_native_arc_count}",
+            f"Native Fusion XY helices -> exact A01: {cam_result.original_native_helix_count}",
+            f"Native Fusion XY spirals retained then linearized: "
+            f"{cam_result.original_native_spiral_count} -> "
+            f"{cam_result.spiral_linearized_segment_count} L01",
+            f"Arc-fit candidates checked: {cam_result.candidate_count}",
+            f"Fitted A01 segments: {cam_result.fitted_arc_count}",
+            f"Exactly collinear motions removed: {cam_result.exact_collinear_removed_count}",
+            f"3D simplification motions removed: {cam_result.simplified_removed_count}",
+            f"Measured 3D simplification deviation: "
+            f"{cam_result.simplification_max_deviation_mm:.6f} mm",
+            f"Remaining L01 motions: {cam_result.remaining_line_count}",
+            f"Output motions: {len(raw.moves)}",
+            f"Complete generated TCN lines: {complete_tcn_lines} "
+            f"(warning level {cam_options.tcn_line_warning_limit})",
+            *( ["WARNING ONLY: complete TCN line count exceeds the configured level. Export remains available; no tolerance was relaxed."]
+               if complete_tcn_lines > cam_options.tcn_line_warning_limit else [] ),
+            f"Maximum fitted radial deviation: {cam_result.maximum_residual_mm:.6f} mm",
+            f"CAM bounds: X {lower.x:.4f}..{upper.x:.4f}, "
+            f"Y {lower.y:.4f}..{upper.y:.4f}, Z {lower.z:.4f}..{upper.z:.4f} mm",
+            "CAM is appended as one independent SIDE1 L01/A01 profile; no W#89 is emitted.",
+            "",
+        ))
     fictive_frames = [
         frame for frame in panel.machining_frames
         if frame.kind == MachiningFrameKind.FICTIVE_FACE
@@ -397,8 +490,75 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
                 ),
                 selected_profile_keys=selected_keys,
             )
+            cam_operation = None
+            cam_result = None
+            cam_options = None
+            combined_preview = None
+            complete_tcn_lines = None
+            cam_shift = (0.0, 0.0)
+            if _cam_enabled(self.inputs):
+                cam_operation = _selected_cam_operation(self.inputs, self.state)
+                problem = operation_problem(cam_operation)
+                if problem:
+                    raise ValueError(problem)
+                cam_options = cam_options_from_inputs(self.inputs)
+                logger.info("CAM EXPORT ENABLED: %s", operation_label(cam_operation))
+                started = time.monotonic()
+                logger.info("CAM stage=post start operation=%s", cam_operation.name)
+                raw_cam = post_operation(
+                    cam_operation, cam_options.post_linearization_tolerance_mm,
+                    adsk.doEvents,
+                )
+                posted = time.monotonic()
+                logger.info(
+                    "CAM stage=post complete seconds=%.3f motions=%d",
+                    posted - started, len(raw_cam.moves),
+                )
+                cam_result = optimize_toolpath(
+                    raw_cam, cam_options, adsk.doEvents,
+                )
+                logger.info(
+                    "CAM stage=fit complete seconds=%.3f candidates=%d output=%d",
+                    time.monotonic() - posted, cam_result.candidate_count,
+                    len(cam_result.toolpath.moves),
+                )
+                cam_shift = target_stock_xy_shift(panel, cam_result.toolpath)
+                logger.info(
+                    "CAM raw=%d linear=%d native_arcs=%d native_helices=%d "
+                    "native_spirals=%d candidates=%d fitted_A01=%d "
+                    "collinear_removed=%d simplified_removed=%d remaining_L01=%d "
+                    "output=%d max_residual=%.6f simplify_deviation=%.6f "
+                    "stock_shift=(%.4f, %.4f)",
+                    cam_result.original_motion_count, raw_cam.linear_count,
+                    raw_cam.native_arc_count, raw_cam.native_helix_count,
+                    raw_cam.native_spiral_count, cam_result.candidate_count,
+                    cam_result.fitted_arc_count,
+                    cam_result.exact_collinear_removed_count,
+                    cam_result.simplified_removed_count,
+                    cam_result.remaining_line_count, len(cam_result.toolpath.moves),
+                    cam_result.maximum_residual_mm,
+                    cam_result.simplification_max_deviation_mm, *cam_shift,
+                )
+                for index, motion in enumerate(cam_result.toolpath.moves):
+                    if isinstance(motion, PostedArcXY) and motion.fitted:
+                        logger.debug(
+                            "ARC FIT index=%d Z=%.6f center=(%.6f,%.6f) "
+                            "sweep=%.6f direction=%s residual=%.6f",
+                            index, motion.end.z, motion.center.x, motion.center.y,
+                            motion.sweep_radians or 0.0,
+                            "CW" if motion.clockwise else "CCW",
+                            motion.max_residual_mm,
+                        )
+                combined_preview = append_cam_profile_to_tcn(
+                    writer.render(panel), cam_result, cam_shift, adsk.doEvents,
+                )
+                complete_tcn_lines = tcn_physical_line_count(combined_preview)
             answer = ui.messageBox(
-                _report(panel, writer), "TribuExporter V1",
+                _report(
+                    panel, writer, cam_operation, cam_result, cam_options,
+                    complete_tcn_lines,
+                ),
+                "TribuExporter V1",
                 adsk.core.MessageBoxButtonTypes.YesNoButtonType,
                 adsk.core.MessageBoxIconTypes.QuestionIconType,
             )
@@ -410,16 +570,31 @@ class ExecuteHandler(adsk.core.CommandEventHandler):
             output = _save_path(ui, _body_name(face, document_name) + "_TPA")
             if output is None:
                 return
-            writer.write(panel, output)
+            if cam_result is None:
+                # Deliberately retain the exact pre-CAM geometry-only path.
+                writer.write(panel, output)
+            else:
+                Path(output).write_text(combined_preview, encoding="ascii")
             _save_preferences(
                 face.body, self.inputs, self.state.profile_keys,
                 selected_keys, logger,
             )
             logger.info("Wrote profile/hole TCN: %s", output)
             written_count = len(writer.profiles_for_export(panel))
+            cam_text = ""
+            if cam_result is not None:
+                cam_text = (
+                    f"\nCAM operation: {operation_label(cam_operation)}\n"
+                    f"CAM output: {cam_result.remaining_line_count} L01 + "
+                    f"{cam_result.toolpath.native_arc_count + cam_result.toolpath.native_helix_count + cam_result.fitted_arc_count} A01.\n"
+                    f"Complete TCN: {complete_tcn_lines} lines "
+                    f"(warning level {cam_options.tcn_line_warning_limit}).\n"
+                    "It is one independent SIDE1 profile with no W#89 setup.\n"
+                )
             ui.messageBox(
                 f"Exported {written_count} independent profiles and "
-                f"{len(panel.holes)} native blind holes.\n\n{output}\n\n"
+                f"{len(panel.holes)} native blind holes.\n"
+                f"{cam_text}\n{output}\n\n"
                 "Inspect every contour, hole, SIDE, coordinate, and depth in "
                 "TpaCAD before assigning technology or executing the program.",
                 "TribuExporter V1",
@@ -445,11 +620,58 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
         self.state = state
 
     def notify(self, args):
-        if self.state.updating or args.input.id not in self._GEOMETRY_INPUTS:
+        if self.state.updating:
             return
         logger = get_logger()
         try:
             self.state.updating = True
+            if args.input.id == "export_cam_toolpath":
+                enabled = _cam_enabled(self.inputs)
+                dropdown = self.inputs.itemById("cam_toolpath")
+                status = self.inputs.itemById("cam_status")
+                dropdown.isVisible = dropdown.isEnabled = enabled
+                status.isVisible = enabled
+                for input_id in (
+                    "cam_post_tolerance", "cam_fit_arcs", "cam_arc_tolerance",
+                    "cam_merge_collinear", "cam_simplify_3d",
+                    "cam_simplify_tolerance", "cam_line_warning",
+                    "cam_reset_options",
+                ):
+                    self.inputs.itemById(input_id).isVisible = enabled
+                if enabled:
+                    _populate_cam_choices(self.inputs, self.state)
+                else:
+                    dropdown.listItems.clear()
+                    self.state.cam_operations = []
+                    status.text = "CAM export is off. Manufacture data was not queried."
+                return
+            if args.input.id == "cam_toolpath":
+                operation = _selected_cam_operation(self.inputs, self.state)
+                if operation is not None:
+                    smoothing, warning = operation_smoothing_info(operation)
+                    self.inputs.itemById("cam_status").text = (
+                        smoothing + (
+                            "\nWARNING: regenerate with Fusion Fit arcs; "
+                            "redistribute emits many linear points."
+                            if warning else ""
+                        )
+                    )
+                return
+            if args.input.id == "cam_fit_arcs":
+                self.inputs.itemById("cam_arc_tolerance").isEnabled = bool(
+                    self.inputs.itemById("cam_fit_arcs").value
+                )
+                return
+            if args.input.id == "cam_simplify_3d":
+                self.inputs.itemById("cam_simplify_tolerance").isEnabled = bool(
+                    self.inputs.itemById("cam_simplify_3d").value
+                )
+                return
+            if args.input.id == "cam_reset_options":
+                reset_cam_option_inputs(self.inputs)
+                return
+            if args.input.id not in self._GEOMETRY_INPUTS:
+                return
             side1 = self.inputs.itemById("side1")
             if side1.selectionCount == 1:
                 face = adsk.fusion.BRepFace.cast(side1.selection(0).entity)
@@ -495,9 +717,13 @@ class ValidateHandler(adsk.core.ValidateInputsEventHandler):
     def notify(self, args):
         try:
             inputs = args.inputs
-            args.areInputsValid = (
-                _base_inputs_valid(inputs) and self.state.panel is not None
-            )
+            valid = _base_inputs_valid(inputs) and self.state.panel is not None
+            if valid and _cam_enabled(inputs):
+                cam_options_from_inputs(inputs)
+                valid = operation_problem(
+                    _selected_cam_operation(inputs, self.state),
+                ) is None
+            args.areInputsValid = valid
         except Exception:
             args.areInputsValid = False
 
@@ -549,6 +775,21 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
             "Export native Fusion simple blind holes (W#81 CAM)",
             True, "", False,
         )
+        inputs.addBoolValueInput(
+            "export_cam_toolpath", "Export CAM toolpath", True, "", False,
+        )
+        cam_toolpath = inputs.addDropDownCommandInput(
+            "cam_toolpath", "CAM toolpath",
+            adsk.core.DropDownStyles.TextListDropDownStyle,
+        )
+        cam_toolpath.isVisible = False
+        cam_toolpath.isEnabled = False
+        cam_status = inputs.addTextBoxCommandInput(
+            "cam_status", "", "CAM export is off. Manufacture data was not queried.",
+            2, True,
+        )
+        cam_status.isVisible = False
+        add_cam_option_inputs(inputs, visible=False)
         profile_selection = inputs.addDropDownCommandInput(
             "profile_selection", "Profiles to export",
             adsk.core.DropDownStyles.CheckBoxDropDownStyle,
@@ -581,12 +822,23 @@ def run(context):
         created = CreatedHandler()
         definition.commandCreated.add(created)
         _handlers.append(created)
-        workspace = ui.workspaces.itemById(WORKSPACE_ID)
-        panel = workspace.toolbarPanels.itemById(PANEL_ID)
-        control = panel.controls.itemById(COMMAND_ID)
-        if control is None:
-            control = panel.controls.addCommand(definition)
-        control.isPromoted = True
+        installed = 0
+        for workspace_id, panel_id in TOOLBAR_TARGETS:
+            workspace = ui.workspaces.itemById(workspace_id)
+            panel = workspace.toolbarPanels.itemById(panel_id) if workspace else None
+            if panel is None:
+                get_logger().warning(
+                    "Toolbar panel unavailable workspace=%s panel=%s",
+                    workspace_id, panel_id,
+                )
+                continue
+            control = panel.controls.itemById(COMMAND_ID)
+            if control is None:
+                control = panel.controls.addCommand(definition)
+            control.isPromoted = True
+            installed += 1
+        if installed == 0:
+            raise ValueError("No supported Fusion toolbar panel is available")
         get_logger().info("TribuExporter V1 add-in started")
     except Exception:
         ui.messageBox(traceback.format_exc(), "TribuExporter V1 start failed")
@@ -595,11 +847,12 @@ def run(context):
 def stop(context):
     ui = adsk.core.Application.get().userInterface
     try:
-        workspace = ui.workspaces.itemById(WORKSPACE_ID)
-        panel = workspace.toolbarPanels.itemById(PANEL_ID) if workspace else None
-        control = panel.controls.itemById(COMMAND_ID) if panel else None
-        if control:
-            control.deleteMe()
+        for workspace_id, panel_id in TOOLBAR_TARGETS:
+            workspace = ui.workspaces.itemById(workspace_id)
+            panel = workspace.toolbarPanels.itemById(panel_id) if workspace else None
+            control = panel.controls.itemById(COMMAND_ID) if panel else None
+            if control:
+                control.deleteMe()
         definition = ui.commandDefinitions.itemById(COMMAND_ID)
         if definition:
             definition.deleteMe()

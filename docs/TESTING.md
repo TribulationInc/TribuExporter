@@ -105,3 +105,26 @@ orientation or profile boundary differs from the Fusion body.
 12. Open/save in TpaCAD, compare semantic coordinates, run normal simulation,
     and stop before CNC execution if any side, center, depth, or diameter is
     unexpected.
+
+## Optional CAM trajectory acceptance
+
+Automated tests verify native planar A01 preservation, exact helical A01 Z
+development, typed spiral retention and bounded fallback, exact collinear
+merging, movement/feed boundary isolation, measured-error 3D simplification,
+and complete-file line counting.
+
+1. Generate a small Fusion XY helical ramp with known radius, sweep, start Z
+   and final Z.
+   `tests/fixtures/helical_a01_validation.tcn` is a geometry-only synthetic
+   one-turn reference with radius 10 mm and Z development from 0 to -3 mm.
+2. Export it and confirm one `W#2101 ::WTa` record carries the XY endpoint,
+   incremental I/J centre and final Z without intermediate L01 records.
+3. Open and re-save it in TpaCAD. Confirm start/end Z, radius, direction and
+   sweep are unchanged.
+4. Do not execute helical A01 on the Busellato until normal machine-side
+   simulation and a safe test establish support for this dialect.
+5. For a Parallel operation, compare 3D simplification off and on. Confirm the
+   report stays within the selected tolerance and inspect all retained Z
+   extrema, pass boundaries and sharp turns.
+6. Set a deliberately low TCN line threshold. Confirm it warns but still
+   permits export and does not alter any tolerance.

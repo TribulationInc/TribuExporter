@@ -234,3 +234,21 @@ The IR contains no tool, compensation, feed, spindle, pass, setup, pocket,
 rabbet, engraving, or inferred drilling instruction. Manufacturing
 interpretation and CAM remain in TpaCAD except for the explicit opt-in native
 simple blind-hole mapping described above.
+
+## Optional resolved-CAM trajectory compression
+
+The CAM bridge is separate from BRep extraction. Its intermediate `.tribupath`
+retains Fusion-native XY arcs, constant-radius XY helices, and XY spirals before
+fallback approximation. Native arcs and helices never enter the line-to-arc
+fitter. Helices serialize as TpaCAD A01 helicoidal development; spirals remain
+explicit IR until linearized with the operator's post tolerance.
+
+The order is: retain native primitives, linearize unsupported spirals/circular
+planes at the declared post tolerance, optionally fit eligible constant-Z
+cutting polylines to A01, merge exactly collinear same-class moves, optionally
+simplify same-class 3D line runs, then count the complete TCN. The line
+threshold only warns; it never blocks export or changes a tolerance.
+
+3D simplification preserves movement/feed boundaries, Z extrema, endpoints and
+turns of at least 15 degrees. Its report gives the maximum measured distance of
+every removed source point from its replacement chord. It is off by default.

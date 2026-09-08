@@ -10,6 +10,8 @@ The exporter creates selectable geometry. TpaCAD remains responsible for
 setups, tools, compensation, depth passes, entry and exit, sequencing, and all
 other CAM decisions. Native simple blind holes are one explicit, disabled-by-
 default exception: when enabled, they are emitted as TPA hole workings.
+One selected, already-generated Fusion 3-axis CAM operation can also be added
+as an independent trajectory when its separate checkbox is enabled.
 
 ## Before exporting
 
@@ -116,6 +118,70 @@ pattern are still ordinary final-body BRep geometry, so some may appear in the
 optional profile checklist—often on a lateral face. Leave those profiles
 unchecked when they are not intended as contour geometry.
 
+### One optional Fusion CAM toolpath
+
+**Export CAM toolpath** is off by default. While it remains off, TribuExporter
+does not query Manufacture and the geometry-only TCN output is unchanged.
+When enabled, choose exactly one generated, current, non-suppressed milling
+operation from **CAM toolpath**. The geometry command lists 3-axis Fusion 3D
+Contour and Parallel operations whose setup axes and stock agree with the
+Tribu panel frame. The standalone Manufacture command can export other
+generated 3-axis milling operations for careful experimentation.
+
+The resolved tool-center motions are appended to `SIDE1` as one independent
+open L01/A01 profile. Fusion-native constant-Z XY arcs are preserved as A01.
+Full circles are four continuous 90° A01 records. Fusion-native constant-radius
+XY helices are retained and emitted as one helicoidal A01 per native circular
+record. XY spirals are retained in `.tribupath` before explicit
+tolerance-controlled linearization. Other unsupported circular planes are
+linearized by Fusion's post engine at the selected post tolerance.
+
+The CAM window exposes every approximation separately:
+
+- **Post linearization tolerance** controls unsupported post circular moves and
+  retained spiral fallback. It is never changed automatically.
+- **Fit fallback XY line chains to A01** and its tolerance control optional arc
+  recovery from eligible constant-Z cutting lines.
+- **Merge exactly collinear motions** removes only redundant points with the
+  same feed and movement class; it introduces no geometric approximation.
+- **Simplify 3D line chains** is optional and off by default. Its tolerance is
+  a maximum measured point-to-chord deviation. Pass/movement boundaries, Z
+  extrema and turns of 15 degrees or more are preserved.
+- **Warn above complete TCN lines** is warning-only. Export remains available
+  and no tolerance is silently relaxed.
+- **Reset CAM parameters to safe defaults** restores all values in this CAM
+  section. It does not regenerate or modify the selected Fusion operation.
+
+The window also reports Fusion's smoothing mode. When it says
+`redistribute`/Evenly spaced points, regenerate the Fusion operation with
+**Fit arcs** when suitable; otherwise Fusion has already converted eligible
+curves into dense point sequences.
+
+No W#89, tool, compensation, feed, or strategy is written to TCN. Fusion feed
+and movement classes are retained internally for continuity decisions and
+diagnostics. Apply one normal setup to the complete trajectory in TpaCAD. The
+intermediate `.tribupath` exists only in a temporary directory during export
+and is deleted automatically.
+
+For long paths, Fusion may instead post the bundled Tribu post manually to a
+persistent `.tribupath`. Convert that file outside Fusion from the repository
+directory:
+
+```powershell
+python tribu_cam_convert.py "C:\path\operation.tribupath"
+```
+
+This produces `operation_TRIBU_CAM.tcn` beside the input. It performs the same
+native-primitive preservation and configurable compression without occupying
+Fusion's Python/UI process. Run `python tribu_cam_convert.py --help` for all
+controls. It never adds W#89 or a tool.
+
+For the original standalone workflow, select exactly one generated operation
+in the Manufacture browser and run **Export Selected CAM Toolpath to TCN** from
+Manufacture → Utilities → Add-Ins. This writes only that trajectory, without
+the BRep geometry profiles; it also retains support for the previously tested
+3-axis milling operations such as Adaptive.
+
 ## Choose profiles
 
 After SIDE1, P0, PX, and PY are complete, the **Profiles to export** checklist
@@ -168,6 +234,11 @@ Before creating executable CAM:
    and diameter; confirm no unwanted hole-looking geometry became a working.
 9. Apply technology in TpaCAD and run the normal machine-side simulation and
    safety checks.
+10. If CAM export was enabled, verify the selected operation, the complete
+    ordered trajectory, every Z transition, L01/A01 counts, warning threshold,
+    selected tolerances and reported maximum deviation before applying one
+    setup to it. Helicoidal A01 remains subject to TpaCAD round-trip and actual
+    Busellato validation before production use.
 
 Stop if any stock dimension, side assignment, contour, depth, or orientation
 does not match the Fusion model.

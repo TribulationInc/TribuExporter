@@ -6,8 +6,9 @@
 
 TribuExporter transfers the manufacturing geometry of a panel-like Fusion 360
 solid into a profile-first `.tcn` file. The objective is simple: preserve the
-modelled part, make its contours easy to select in TpaCAD, and leave CAM to the
-operator. Native simple blind holes are the one opt-in CAM shortcut.
+modelled part and make its contours easy to select in TpaCAD. Native simple
+blind holes and one explicitly selected Fusion toolpath are opt-in shortcuts;
+both are disabled by default.
 
 ```text
 Fusion 360 solid → TribuExporter → independent TPA profiles → TpaCAD CAM
@@ -36,6 +37,11 @@ selects a tool.
 - A persistent profile checklist, stored per Fusion body after export.
 - Optional translation of native Fusion simple blind `HoleFeature` objects to
   TPA hole workings. Hole-looking BRep cylinders are never inferred.
+- Optional export of exactly one generated 3-axis Fusion CAM operation as one
+  independent SIDE1 trajectory. Native XY arcs remain A01; native XY helices
+  use A01 helicoidal development. Post linearization, fallback arc fitting and
+  optional 3D simplification have separate explicit tolerances. No TPA setup or
+  tool is generated.
 
 Fusion feature-pattern copies of a hole are not translated to W#81. For a
 repeated drilling layout, pattern the sketch points first and create the native
@@ -87,6 +93,19 @@ Tests use synthetic, redistributable fixtures. Proprietary TpaCAD manuals,
 installed product samples, Busellato macros, and private machine programs are
 development references only and are intentionally excluded from this public
 repository.
+
+A `.tribupath` manually generated in Fusion with the bundled post can also be
+converted outside Fusion, keeping the Fusion UI completely out of parsing and
+arc fitting:
+
+```powershell
+python tribu_cam_convert.py "C:\path\operation.tribupath"
+```
+
+The output is `<input>_TRIBU_CAM.tcn`. Use `--help` for output-path, separate
+post/arc/3D tolerances, exact collinear merging, line-count warning and
+overwrite options. This remains a geometry-only trajectory: no W#89 setup or
+tool is added.
 
 Contributions are welcome; read [CONTRIBUTING.md](CONTRIBUTING.md) first.
 

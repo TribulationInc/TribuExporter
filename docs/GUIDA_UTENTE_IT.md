@@ -10,6 +10,8 @@ L'esportatore crea geometria selezionabile. Setup, utensili, compensazione,
 passate in profondità, entrate e uscite, sequenza e ogni altra scelta CAM
 rimangono in TpaCAD. I fori ciechi semplici nativi sono l'unica eccezione
 esplicita e facoltativa: se abilitati, diventano lavorazioni foro TPA.
+È inoltre possibile aggiungere una singola operazione CAM Fusion 3 assi già
+calcolata tramite una seconda opzione, disattivata per impostazione predefinita.
 
 ## Prima dell'esportazione
 
@@ -119,6 +121,70 @@ finito e possono quindi comparire nella checklist dei profili opzionali, spesso
 su una faccia laterale. Lasciali deselezionati quando non devono diventare
 geometria di contorno.
 
+### Un percorso CAM Fusion opzionale
+
+**Export CAM toolpath** è disattivato per impostazione predefinita. Finché è
+disattivato, TribuExporter non interroga Manufacture e il TCN geometrico rimane
+identico. Se lo abiliti, scegli una sola operazione di fresatura già calcolata,
+valida, aggiornata e non soppressa dalla lista **CAM toolpath**. Il primo caso
+supportato dal comando geometria comprende 3D Contour e Parallel Fusion a 3
+assi, con assi del setup e grezzo coerenti con il riferimento pannello Tribu.
+Il comando autonomo in Manufacture permette di sperimentare con altre
+operazioni di fresatura 3 assi già calcolate.
+
+I movimenti risolti del centro utensile vengono aggiunti a `SIDE1` come un
+unico profilo aperto indipendente L01/A01. Gli archi XY nativi di Fusion a Z
+costante rimangono A01; un cerchio completo viene diviso in quattro A01 da 90°.
+Le eliche XY native a raggio costante diventano A01 con sviluppo elicoidale.
+Le spirali XY restano tipizzate nel `.tribupath` fino alla linearizzazione
+esplicita. Gli altri archi non supportati vengono linearizzati dal post Fusion
+con la tolleranza scelta.
+
+La finestra CAM espone separatamente ogni approssimazione:
+
+- **Post linearization tolerance** controlla la linearizzazione del post e
+  quella delle spirali; non viene mai modificata automaticamente.
+- **Fit fallback XY line chains to A01** abilita il fitting opzionale, con una
+  tolleranza dedicata.
+- **Merge exactly collinear motions** elimina soltanto punti matematicamente
+  ridondanti con stessa classe e avanzamento, senza approssimazione.
+- **Simplify 3D line chains** è facoltativo e inizialmente disattivato. La sua
+  tolleranza limita la deviazione punto-corda misurata. Confini tra movimenti,
+  estremi Z e svolte di almeno 15 gradi restano invariati.
+- **Warn above complete TCN lines** genera soltanto un avviso: l'esportazione
+  resta possibile e nessuna tolleranza viene allargata.
+- **Reset CAM parameters to safe defaults** ripristina tutti i valori di questa
+  sezione CAM senza rigenerare o modificare l'operazione Fusion selezionata.
+
+La finestra mostra anche lo smoothing Fusion. Se indica `redistribute`/Evenly
+spaced points, rigenera l'operazione con **Fit arcs** quando appropriato.
+
+Nel TCN non vengono scritti W#89, utensile, compensazione, avanzamento o
+strategia. Avanzamenti e classi Fusion restano informazioni interne usate per
+continuità e diagnostica. In TpaCAD applica un solo setup all'intera traiettoria.
+Il file intermedio `.tribupath` vive soltanto in una cartella temporanea durante
+l'esportazione e viene eliminato automaticamente.
+
+Per percorsi lunghi puoi invece usare manualmente in Fusion il post Tribu e
+salvare un `.tribupath` permanente. Dalla cartella del repository convertilo
+fuori da Fusion:
+
+```powershell
+python tribu_cam_convert.py "C:\percorso\operazione.tribupath"
+```
+
+Viene creato `operazione_TRIBU_CAM.tcn` accanto al file di ingresso, con la
+stessa conservazione delle primitive native e la stessa compressione
+configurabile, senza occupare il processo Python/UI di Fusion. Esegui
+`python tribu_cam_convert.py --help` per tutte le opzioni. Non vengono aggiunti
+W#89 o utensili.
+
+Per il flusso autonomo originale, seleziona una sola operazione già calcolata
+nel browser Manufacture e avvia **Export Selected CAM Toolpath to TCN** da
+Manufacture → Utilities → Add-Ins. Questo comando scrive soltanto la
+traiettoria, senza i profili geometrici BRep, e mantiene anche il supporto alle
+operazioni di fresatura 3 assi già provate, come Adaptive.
+
 ## Scegliere i profili
 
 Dopo aver completato SIDE1, P0, PX e PY, si popola la lista
@@ -173,6 +239,10 @@ Prima di creare lavorazioni eseguibili:
    sia diventata una lavorazione.
 9. Assegna la tecnologia in TpaCAD ed esegui la normale simulazione e tutti i
    controlli di sicurezza della macchina.
+10. Se hai abilitato il CAM, verifica operazione scelta, traiettoria completa,
+    transizioni Z, conteggi L01/A01, tolleranze, soglia di avviso e deviazione
+    massima dichiarata prima di applicare un unico setup. Prima dell'uso in
+    produzione, valida l'A01 elicoidale con round-trip TpaCAD e sulla Busellato.
 
 Fermati se una dimensione del grezzo, un'assegnazione di faccia, un contorno,
 una profondità o un orientamento non corrisponde al modello Fusion.
