@@ -7,16 +7,18 @@
 TribuExporter transfers the manufacturing geometry of a panel-like Fusion 360
 solid into a profile-first `.tcn` file. The objective is simple: preserve the
 modelled part and make its contours easy to select in TpaCAD. Native simple
-blind holes and one explicitly selected Fusion toolpath are opt-in shortcuts;
-both are disabled by default.
+blind holes, selected fictive-face blade analysis, and one explicitly selected
+Fusion toolpath are opt-in features; all are disabled by default.
 
 ```text
 Fusion 360 solid → TribuExporter → independent TPA profiles → TpaCAD CAM
 ```
 
-TribuExporter does **not** choose tools, compensation, feeds, passes, entry
-moves, setup technology, or machining order. Optional native-hole output never
-selects a tool.
+Geometry profiles leave tool and setup assignment to TpaCAD. Optional native-hole
+output never selects a tool. The explicit blade option uses an operator-supplied
+machine profile for analysis. Executable blade output is blocked until the
+custom PPC LAME/W95 reference mapping is verified against finished geometry.
+See [blade setup and supported scope](docs/BLADE_CUTS.md).
 
 ![Independent outer, recessed and internal profiles in TpaCAD](docs/images/tpacad-independent-profiles.png)
 
@@ -32,6 +34,9 @@ selects a tool.
   side's native TpaCAD coordinate system.
 - Explicitly selected planar inclined faces as additional fictive faces
   `SIDE7+`.
+- **Add Blade cut on fictive faces**: analysis of selected exterior inclined
+  faces, with whole-body preservation checks and a local machine profile.
+  Fictive geometry is retained; executable blade export is currently blocked.
 - Exact lines and circular arcs/circles.
 - Other bounded planar curves linearized at an explicit chordal tolerance.
 - A persistent profile checklist, stored per Fusion body after export.

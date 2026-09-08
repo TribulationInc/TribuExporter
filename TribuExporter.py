@@ -34,9 +34,9 @@ def run(context):
         # dependencies in order so a normal Stop → Run cycle uses current files.
         import importlib
         from tribu_exporter import (
-            model, tcn, cam_export, cam_addin, fusion_extract, addin,
+            model, blade, tcn, cam_export, cam_addin, fusion_extract, addin,
         )
-        for module in (model, tcn, cam_export, cam_addin, fusion_extract, addin):
+        for module in (model, blade, tcn, cam_export, cam_addin, fusion_extract, addin):
             importlib.reload(module)
         addin.run(context)
         cam_addin.run(context)

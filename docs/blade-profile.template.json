@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "name": "Configure your Busellato blade",
+  "macro_path": "..\\custom\\mcr\\lame.tmcr",
+  "tool_id": null,
+  "diameter_mm": null,
+  "kerf_mm": null,
+  "max_cutting_depth_mm": null,
+  "z_reference": "CHOOSE_CONFIRMED_REFERENCE",
+  "beta_sign": null,
+  "max_abs_beta_degrees": null,
+  "min_beta_degrees": null,
+  "travel_angles_degrees": [],
+  "pass_policy": "single_pass",
+  "normal_offset_mm": null,
+  "breakthrough_mm": null,
+  "end_clearance_mm": null,
+  "compensation_reference": "finished_surface",
+  "spindle_rpm": null,
+  "entry_feed": null,
+  "cutting_feed": null
+}

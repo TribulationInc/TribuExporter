@@ -11,7 +11,10 @@ from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 import hashlib
 import math
-from typing import Iterable, Sequence
+from typing import Iterable, Sequence, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .blade import BladeCutIR
 
 
 EPS_MM = 1e-5
@@ -369,6 +372,7 @@ class PanelIR:
     explicit_stock_height: float | None = None
     comment: str = "TRIBU Fusion geometry export V1"
     curve_tolerance_mm: float = 0.01
+    blade_cuts: list["BladeCutIR"] = field(default_factory=list)
 
     @property
     def required_stock_width(self) -> float:
@@ -402,6 +406,9 @@ class PanelIR:
             if value <= 0 or not math.isfinite(value):
                 raise ValueError(f"{name} must be a finite value > 0")
         self.allowance.validate()
+        if self.blade_cuts:
+            from .blade import validate_blade_cuts
+            validate_blade_cuts(self)
         frame_ids = [frame.frame_id for frame in self.machining_frames]
         frame_sides = [frame.tpa_face_number for frame in self.machining_frames
                        if frame.tpa_face_number is not None]

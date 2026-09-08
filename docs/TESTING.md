@@ -128,3 +128,13 @@ and complete-file line counting.
    extrema, pass boundaries and sharp turns.
 6. Set a deliberately low TCN line threshold. Confirm it warns but still
    permits export and does not alter any tolerance.
+# Blade acceptance
+
+Run `python -m unittest tests.test_blade tests.test_blade_evidence tests.test_blade_ui -v`
+for synthetic geometry, actual machine observations, production blocking and UI
+state tests A-G. These tests do not establish the full machine reference mapping.
+
+See [Blade verification](BLADE_CUTS.md#ui-state-and-verification). Confirm live
+checkbox/picker behavior and ordinary geometry export with blade intent off.
+Machine output must remain blocked until a complete reference adapter and the
+required Fusion/TpaCAD round trip establish the finished-side cut plane.

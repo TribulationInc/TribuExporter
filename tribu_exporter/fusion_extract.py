@@ -124,7 +124,7 @@ def make_panel_frame(face, p0, px, py) -> PanelFrame:
     z_axis = _v3_vector(normal).normalized()
     x_projection = x_raw - z_axis.scaled(x_raw.dot(z_axis))
     if x_projection.length <= EPS_CM:
-        raise ValueError("P0→PX is perpendicular to SIDE#1")
+        raise ValueError("P0â†’PX is perpendicular to SIDE#1")
     x_axis = x_projection.normalized()
     y_candidate = z_axis.cross(x_axis).normalized()
     y_projection = y_raw - z_axis.scaled(y_raw.dot(z_axis))
@@ -1225,12 +1225,69 @@ def _extract_native_blind_holes(
     return holes, unsupported
 
 
+def _blade_body_support(source_face, panel_frame: PanelFrame, frame_ir,
+                        xmin, ymin, allowance, logger=None) -> tuple[float, float]:
+    """Bound the complete finished body along the selected face's normal.
+
+    Face exposure alone cannot prove an extended straight saw cut safe. Using
+    directional BRep bounds also includes curved extrema between vertices.
+    All points and vectors here stay in the selected occurrence's context.
+    """
+    normal = frame_ir.outward_axis
+    model_normal = (
+        panel_frame.x_axis.scaled(normal[0])
+        + panel_frame.y_axis.scaled(normal[1])
+        + panel_frame.z_axis.scaled(normal[2])
+    ).normalized()
+    tangent = V3(-normal[1], normal[0], 0).normalized()
+    model_tangent = (
+        panel_frame.x_axis.scaled(tangent.x)
+        + panel_frame.y_axis.scaled(tangent.y)
+    ).normalized()
+    box = adsk.core.Application.get().measureManager.getOrientedBoundingBox(
+        source_face.body, _vector(model_normal), _vector(model_tangent),
+    )
+    if box is None:
+        raise ValueError(f"Blade SIDE{frame_ir.tpa_face_number}: could not prove whole-body support")
+    reference = (
+        panel_frame.origin
+        + panel_frame.x_axis.scaled((frame_ir.origin[0] + xmin - allowance.x_minus) / CM_TO_MM)
+        + panel_frame.y_axis.scaled((frame_ir.origin[1] + ymin - allowance.y_minus) / CM_TO_MM)
+        + panel_frame.z_axis.scaled(frame_ir.origin[2] / CM_TO_MM)
+    )
+    delta = _v3_point(box.centerPoint) - reference
+    outside = (delta.dot(model_normal) + box.length / 2) * CM_TO_MM
+    # A planar face has zero thickness. Verify its analytic plane instead of
+    # asking the solid OBB kernel to fit a degenerate box to that face. Its
+    # ordinary bounds conservatively cover any residual angular disagreement,
+    # including curved edges; checking only its vertices would not do that.
+    plane = adsk.core.Plane.cast(source_face.geometry)
+    if plane is None:
+        raise ValueError(f"Blade SIDE{frame_ir.tpa_face_number}: selected face is not planar")
+    face_normal = _v3_vector(plane.normal).normalized()
+    point = _v3_point(source_face.pointOnFace)
+    offset = (point - reference).dot(model_normal)
+    residual = model_normal - face_normal.scaled(model_normal.dot(face_normal))
+    face_bounds = source_face.boundingBox
+    if face_bounds is None:
+        raise ValueError(f"Blade SIDE{frame_ir.tpa_face_number}: cannot bound the selected face")
+    lower, upper = face_bounds.minPoint, face_bounds.maxPoint
+    face_error = max(abs(offset + residual.dot(V3(x, y, z) - point))
+                     for x in (lower.x, upper.x) for y in (lower.y, upper.y)
+                     for z in (lower.z, upper.z)) * CM_TO_MM
+    if logger:
+        logger.info("Blade support SIDE%d source_face=%s body_outside_mm=%.9f selected_face_plane_error_mm=%.9f",
+                    frame_ir.tpa_face_number, _native_id(source_face), outside, face_error)
+    return outside, face_error
+
+
 def extract_panel_ir(face, frame: PanelFrame, stock_margin_mm: float,
                      curve_tolerance_mm: float = 0.01,
                      explicit_stock_width_mm: float | None = None,
                      explicit_stock_height_mm: float | None = None,
                      logger=None, inclined_faces=(),
-                     export_native_holes: bool = False) -> PanelIR:
+                     export_native_holes: bool = False,
+                     blade_machine=None) -> PanelIR:
     xmin, xmax, ymin, ymax, thickness = panel_extents(face, frame)
     width, height = xmax - xmin, ymax - ymin
     allowance = StockAllowance(stock_margin_mm, stock_margin_mm,
@@ -1487,6 +1544,26 @@ def extract_panel_ir(face, frame: PanelFrame, stock_margin_mm: float,
         ),
         curve_tolerance_mm=curve_tolerance_mm,
     )
+    if blade_machine is not None:
+        from .blade import BladeTargetIR, plan_blade_cuts
+        targets = [BladeTargetIR(
+            _native_id(source_face), frame_ir.frame_id,
+            *_blade_body_support(source_face, frame, frame_ir, xmin, ymin, allowance, logger),
+        ) for source_face, frame_ir, _ in fictive_built]
+        panel.blade_cuts = plan_blade_cuts(panel, targets, blade_machine)
+        panel.comment = "TRIBU Fusion profiles with unverified blade analysis V1"
+        if logger:
+            for cut in panel.blade_cuts:
+                logger.info(
+                    "Blade SIDE1 -> SIDE%d source_face=%s profile=%s tool=%d "
+                    "start=%r end=%r alpha=%.8f beta=%.8f Z=%.8f "
+                    "correction=%d required_depth=%.6f target_n=%r target_d=%.8f",
+                    cut.target_side, cut.source_face_id, cut.machine.name,
+                    cut.machine.tool_id, cut.start_xy, cut.end_xy,
+                    cut.alpha_degrees, cut.beta_degrees, cut.z_mm,
+                    cut.compensation, cut.required_depth_mm,
+                    cut.target_normal, cut.target_offset_mm,
+                )
     panel.validate()
     if logger:
         logger.info(

@@ -95,6 +95,10 @@ def read_tcn(text: str) -> tuple[dict[str, float], list[SemanticProfile]]:
             continue
         if line.startswith("W#81"):
             continue
+        if line.startswith("W#1052{"):
+            # An independent blade macro terminates any preceding profile.
+            active = None
+            continue
         values = {int(number): float(value) for number, value in PARAMETER.findall(line)}
         operation = "L01" if line.startswith("W#2201") else "A01"
         if 8121 in values:

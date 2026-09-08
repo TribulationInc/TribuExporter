@@ -1,0 +1,20 @@
+{
+  "provenance": "Parameter-only excerpts of user-supplied custom PPC lame.tmcr calls; no finished-plane reference is supplied for the dividers.",
+  "records": [
+    {
+      "source": "010-Divisorio verticale.tcn",
+      "dimensions": [1185.04, 870, 25],
+      "parameters": {"8098": "lame.tmcr", "6": 1, "8509": 2, "8510": 1185.04, "8511": 870, "8512": -31.74, "8516": 9600, "8519": 270, "8520": 870, "8521": 51.97, "8525": 1, "8526": 0, "8527": 0}
+    },
+    {
+      "source": "011-Divisorio verticale.tcn",
+      "dimensions": [826.82, 870, 25],
+      "parameters": {"8098": "lame.tmcr", "6": 1, "8509": 2, "8510": 826.82, "8511": 870, "8512": -31.74, "8516": 9600, "8519": 270, "8520": 870, "8521": 51.97, "8525": 1, "8526": 0, "8527": 0}
+    },
+    {
+      "source": "001-Fianco sinistro.tcn",
+      "dimensions": [233.8, 780, 19],
+      "parameters": {"8098": "lame.tmcr", "6": 1, "8509": 2, "8510": 1.15, "8511": -180, "8512": -3, "8513": -28.07, "8516": 9600, "8519": 90, "8520": 1140, "8521": 60.46, "8525": 1, "8526": 1, "8527": 0}
+    }
+  ]
+}

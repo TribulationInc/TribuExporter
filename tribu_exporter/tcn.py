@@ -1,15 +1,20 @@
-"""TCN serialization for profiles and explicitly enabled native holes.
+"""TCN serialization for geometry, holes and explicit Busellato blade workings.
 
 Each PlanarProfileIR starts a new TPA profile with explicit XI/YI. Z is either
 explicit geometric depth or deliberately omitted for setup-controlled geometry.
-Profiles remain geometry-only.  Native blind holes are the one deliberate CAM
-exception and are emitted as minimal W#81 point workings without tool #205.
+A fully converted rectangular ``body_silhouette_outer`` is consumed by four
+BLADEX/BLADEY calls and is therefore not emitted again as mill geometry.
+Native blind holes are emitted as minimal W#81 point workings without tool #205.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from .blade import (
+    BLADE_X, BLADE_Y, BLADE_XY, SOURCE_PROFILE_OUTER,
+    profile_blade_consumed_profile_ids,
+)
 from .model import (
     Arc2D, EPS_MM, Line2D, MachiningFrameKind, MachiningSide,
     HoleIR, PanelIR, PlanarProfileIR,
@@ -83,9 +88,11 @@ class TcnGeometryWriter:
 
     def profiles_for_export(self, panel: PanelIR) -> list[PlanarProfileIR]:
         suppressed = {id(zero) for zero, _ in self.z0_duplicate_pairs(panel)}
+        consumed = profile_blade_consumed_profile_ids(panel)
         return [
             profile for profile in self.selected_profiles(panel)
             if id(profile) not in suppressed
+            and (profile.profile_id or profile.provenance) not in consumed
         ]
 
     def _line(self, segment: Line2D, z_mm: float, first: bool,
@@ -161,12 +168,123 @@ class TcnGeometryWriter:
             " }W",
         ))
 
-    def render(self, panel: PanelIR) -> str:
+    def _blade(self, cut, number: int) -> str:
+        """Serialize one official custom Busellato LAME branch.
+
+        r9=0 -> BLADEX:  r10/r11 start, r17 X final.  Native W95 Beta=90.
+        r9=1 -> BLADEY:  r10/r11 start, r18 Y final.  Native W95 Beta=90.
+        r9=2 -> BLADEXY: r10/r11 start, r19 Alpha, r20 U, r21 Beta.
+        """
+        machine = cut.machine
+        machine.require_verified_adapter()
+        if cut.mode not in (BLADE_X, BLADE_Y, BLADE_XY):
+            raise ValueError(f"Unsupported blade mode {cut.mode}")
+
+        label = (
+            "Outer~profile~trim"
+            if cut.source_kind == SOURCE_PROFILE_OUTER
+            else f"Blade~cut~for~SIDE{cut.target_side}"
+        )
+        fields = [
+            f"W#1052{{ ::WT2 WS={number} W$={label}",
+            f" #8098={machine.macro_path}",
+            " #6=1",
+            f" #8509={cut.mode}",
+            f" #8510={fmt(cut.start_xy[0])}",
+            f" #8511={fmt(cut.start_xy[1])}",
+            f" #8512={fmt(cut.z_mm)}",
+        ]
+
+        if cut.z2_enabled:
+            if cut.z2_mm is None:
+                raise ValueError(
+                    f"Blade SIDE{cut.target_side}: Z2 enabled without Z2 depth"
+                )
+            if not cut.z2_mm < cut.z_mm < 0:
+                raise ValueError(
+                    f"Blade SIDE{cut.target_side}: expected 0 > Zp > Z2"
+                )
+            fields.append(f" #8513={fmt(cut.z2_mm)}")
+        elif cut.z2_mm is not None or cut.z2_feed is not None:
+            raise ValueError(
+                f"Blade SIDE{cut.target_side}: Z2 data present while Z2 is disabled"
+            )
+
+        # Mode-specific geometry comes directly from the official LAME.TMCR.
+        if cut.mode == BLADE_X:
+            if cut.end_axis_mm is None:
+                raise ValueError("BLADEX requires X final / r17")
+            fields.append(f" #8517={fmt(cut.end_axis_mm)}")
+        elif cut.mode == BLADE_Y:
+            if cut.end_axis_mm is None:
+                raise ValueError("BLADEY requires Y final / r18")
+            fields.append(f" #8518={fmt(cut.end_axis_mm)}")
+        else:
+            if cut.end_axis_mm is not None:
+                raise ValueError("BLADEXY must not carry X/Y final-axis data")
+            fields.extend((
+                f" #8519={fmt(cut.alpha_degrees)}",
+                f" #8520={fmt(cut.length_mm)}",
+                f" #8521={fmt(cut.beta_degrees)}",
+            ))
+
+        fields.extend((
+            f" #8516={machine.tool_id}",
+            f" #8525={cut.compensation}",
+            f" #8526={1 if cut.z2_enabled else 0}",
+            " #8527=0",  # chord calculation OFF
+        ))
+
+        for parameter, value in (
+            (8522, machine.spindle_rpm),
+            (8523, machine.cutting_feed),
+            (8524, machine.entry_feed),
+        ):
+            if value is not None:
+                fields.append(f" #{parameter}={fmt(value)}")
+
+        if cut.z2_enabled and cut.z2_feed is not None:
+            fields.append(f" #8529={fmt(cut.z2_feed)}")
+
+        fields.append(" }W")
+        return "".join(fields)
+
+    def blade_lines(self, panel: PanelIR) -> list[str]:
+        """Serialize all planned blade workings in deterministic panel order."""
+        return [self._blade(cut, number) for number, cut in enumerate(panel.blade_cuts, 1)]
+
+    def append_blades_to_tcn(self, tcn_text: str, panel: PanelIR) -> str:
+        """Insert blade workings at the END of SIDE#1 in an existing TCN.
+
+        This is used after CAM append: milling/drilling/CAM stay upstream and the
+        saw trim remains the final SIDE1 operation, so the finished rectangle is
+        not released before later machining.
+        """
+        if not panel.blade_cuts:
+            return tcn_text
         panel.validate()
+        for cut in panel.blade_cuts:
+            cut.machine.require_verified_adapter()
+        marker = "SIDE#1{"
+        start = tcn_text.find(marker)
+        if start < 0:
+            raise ValueError("Cannot append blade workings: SIDE#1 block is missing")
+        close = tcn_text.find("\n}SIDE", start + len(marker))
+        if close < 0:
+            raise ValueError("Cannot append blade workings: SIDE#1 closing block is missing")
+        blade_text = "\n".join(self.blade_lines(panel))
+        return tcn_text[:close] + "\n" + blade_text + tcn_text[close:]
+
+    def render(self, panel: PanelIR, include_blades: bool = True) -> str:
+        panel.validate()
+        for cut in panel.blade_cuts:
+            cut.machine.require_verified_adapter()
         profiles = self.profiles_for_export(panel)
         emitted_sides = sorted(
             {int(profile.machining_side) for profile in profiles}
             | {int(hole.machining_side) for hole in panel.holes}
+            | ({1} | {cut.target_side for cut in panel.blade_cuts}
+               if panel.blade_cuts else set())
         )
         fictive_sides = set(side for side in emitted_sides if side >= 7)
         fictive_frames = sorted(
@@ -202,12 +320,17 @@ class TcnGeometryWriter:
         max_side = max([6] + emitted_sides)
         for side_number in range(1, max_side + 1):
             output.append(f"SIDE#{side_number}{{")
+            # Keep internal/profile geometry and native holes before saw trimming.
+            # Rectangular profile blade cuts can release the finished panel from
+            # surrounding stock, so all blade workings are deliberately emitted last.
             for profile in profiles:
                 if int(profile.machining_side) == side_number:
                     output.extend(self.profile_lines(panel, profile))
             for hole in panel.holes:
                 if int(hole.machining_side) == side_number:
                     output.append(self._hole(hole))
+            if include_blades and side_number == 1:
+                output.extend(self.blade_lines(panel))
             output.append("}SIDE")
         return "\n".join(output) + "\n"
 

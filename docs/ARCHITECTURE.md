@@ -252,3 +252,18 @@ threshold only warns; it never blocks export or changes a tolerance.
 3D simplification preserves movement/feed boundaries, Z extrema, endpoints and
 turns of at least 15 degrees. Its report gives the maximum measured distance of
 every removed source point from its replacement chord. It is off by default.
+# Explicit fictive-face blade intent
+
+`blade.py` separates pure stock/plane planning from an explicit custom Busellato
+machine-reference contract. `fusion_extract.py` supplies complete-body support
+bounds for each requested face in a consistent occurrence context. `PanelIR`
+holds resolved `BladeCutIR` operations separately from profiles and holes.
+
+The writer revalidates against the current stock and fictive frames and checks
+the target plane reconstructed from quantized analysis values. Production output
+is blocked until a complete PPC machine adapter is verified. The raw W#1052
+encoder is tested separately. GEO/GSIDE and profile ownership remain unchanged. No macro bodies or tool
+tables are bundled. See [Blade cuts](BLADE_CUTS.md) for the reference contracts,
+scope and verification limits. Whole-body support and selected-face contact are
+separate extraction guarantees; neither synthetic consistency nor a profile
+setting can bypass the production gate.

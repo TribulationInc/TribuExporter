@@ -242,3 +242,11 @@ Before creating executable CAM:
 
 Stop if any stock dimension, side assignment, contour, depth, or orientation
 does not match the Fusion model.
+# Optional blade cuts
+
+Enable **Add Blade cut on fictive faces** after selecting the desired inclined
+faces to inspect an analysis plan using a local blade profile. Executable blade
+export is currently blocked pending verification of the custom PPC LAME/W95
+reference mapping. The checkbox stays armed during profile and geometry changes;
+only a new body or command resets it. Disable it to export ordinary geometry.
+See [Blade cuts](BLADE_CUTS.md) for evidence, configuration and remaining limits.

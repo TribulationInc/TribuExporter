@@ -246,3 +246,12 @@ Prima di creare lavorazioni eseguibili:
 
 Fermati se una dimensione del grezzo, un'assegnazione di faccia, un contorno,
 una profondità o un orientamento non corrisponde al modello Fusion.
+# Lamate sulle facce fittizie
+
+Dopo aver selezionato le facce inclinate, attivare **Add Blade cut on fictive
+faces** e scegliere il profilo della lama per analizzare i tagli. L'esportazione
+eseguibile delle lamate resta bloccata finché il riferimento XYZ della macro
+PPC LAME/W95 non è verificato rispetto alla faccia finita. Il cambio di profilo
+o del grezzo non disattiva la casella; un nuovo corpo o comando la azzera.
+Disattivarla per esportare la geometria ordinaria. Evidenze e limiti sono
+descritti in [Blade cuts](BLADE_CUTS.md).
