@@ -3,13 +3,15 @@
 This module plans straight Busellato blade workings for two proven cases:
 
 * BLADEXY for operator-selected inclined exterior fictive faces;
-* BLADEX/BLADEY for the four sides of a proven axis-aligned rectangular
-  ``body_silhouette_outer`` profile when the operator explicitly requests
-  ``Use blade for profile cuts``.
+* BLADEX/BLADEY for each side of the finished body's axis-aligned XY bounding
+  box that contains at least one straight outer-profile segment when the
+  operator requests ``Use blade for profile cuts``; selected BLADEXY fictive
+  faces may produce further chamfered/bevelled perimeter segments.
 
-Fusion objects and TCN strings do not enter this module.  Inner profiles,
-pockets, arcs, generic polygons and non-rectangular outer contours are never
-converted to saw cuts by this milestone.
+Fusion objects and TCN strings do not enter this module. Inner profiles and
+pockets are never converted to saw cuts. Covered FINAL_OUTER_CONTOUR segments
+are removed individually. Every uncovered line or curve remains as one of the
+independently started residual profiles.
 
 Machine contract implemented here
 ---------------------------------
@@ -65,7 +67,10 @@ import math
 from pathlib import Path
 import re
 
-from .model import Line2D, MachiningFrameIR, MachiningFrameKind, PanelIR, tcn_quantized
+from .model import (
+    CurveChain2D, Line2D, MachiningFrameIR, MachiningFrameKind, PanelIR,
+    PlanarProfileIR, tcn_quantized,
+)
 
 V3 = tuple[float, float, float]
 
@@ -731,178 +736,253 @@ def _outer_profile(panel: PanelIR):
     return profiles[0]
 
 
-def _rectangle_profile_geometry(panel: PanelIR):
-    """Return (profile, xmin, xmax, ymin, ymax) for an exact 4-line XY rectangle.
+def _finished_bbox_stock_bounds(panel: PanelIR):
+    """Return the finished-body XY bounding rectangle in TPA stock coordinates.
 
-    This milestone deliberately refuses generic linear polygons.  The complete
-    mandatory outer profile must be a four-segment, axis-aligned rectangle at
-    the declared TCN geometry tolerance.
+    Squaring is intentionally derived from the finished body's oriented bounding
+    dimensions, not from the topology of ``body_silhouette_outer``. Collinear
+    splits are classified against these four candidate sides independently.
     """
     profile = _outer_profile(panel)
-    segments = tuple(profile.chain.segments)
+    xmin = panel.allowance.x_minus
+    ymin = panel.allowance.y_minus
+    xmax = xmin + panel.finished_width
+    ymax = ymin + panel.finished_height
     tolerance = panel.curve_tolerance_mm
-
-    if not profile.chain.closed or len(segments) != 4:
-        raise ValueError(
-            "Use blade for profile cuts currently requires a closed outer "
-            "rectangle made of exactly four segments"
-        )
-    if any(not isinstance(segment, Line2D) for segment in segments):
-        raise ValueError(
-            "Use blade for profile cuts currently supports rectangles made only "
-            "of four straight Line2D segments"
-        )
-
-    points = [point for segment in segments for point in (segment.start, segment.end)]
-    xmin = min(point.x for point in points)
-    xmax = max(point.x for point in points)
-    ymin = min(point.y for point in points)
-    ymax = max(point.y for point in points)
     if xmax - xmin <= tolerance or ymax - ymin <= tolerance:
-        raise ValueError("Outer rectangle collapsed below geometric tolerance")
-
-    seen_sides: set[str] = set()
-    for index, segment in enumerate(segments, 1):
-        dx = segment.end.x - segment.start.x
-        dy = segment.end.y - segment.start.y
-        horizontal = abs(dy) <= tolerance and abs(dx) > tolerance
-        vertical = abs(dx) <= tolerance and abs(dy) > tolerance
-        if horizontal == vertical:
-            raise ValueError(
-                f"Outer rectangle segment {index} is not a unique X/Y straight edge"
-            )
-
-        if horizontal:
-            y = (segment.start.y + segment.end.y) / 2.0
-            if abs(y - ymin) <= tolerance:
-                side = "ymin"
-            elif abs(y - ymax) <= tolerance:
-                side = "ymax"
-            else:
-                raise ValueError(
-                    f"Outer rectangle segment {index} is horizontal but not on a rectangle bound"
-                )
-            for point in (segment.start, segment.end):
-                if not (abs(point.x - xmin) <= tolerance or abs(point.x - xmax) <= tolerance):
-                    raise ValueError(
-                        f"Outer rectangle segment {index} endpoint is not a rectangle corner"
-                    )
-        else:
-            x = (segment.start.x + segment.end.x) / 2.0
-            if abs(x - xmin) <= tolerance:
-                side = "xmin"
-            elif abs(x - xmax) <= tolerance:
-                side = "xmax"
-            else:
-                raise ValueError(
-                    f"Outer rectangle segment {index} is vertical but not on a rectangle bound"
-                )
-            for point in (segment.start, segment.end):
-                if not (abs(point.y - ymin) <= tolerance or abs(point.y - ymax) <= tolerance):
-                    raise ValueError(
-                        f"Outer rectangle segment {index} endpoint is not a rectangle corner"
-                    )
-
-        if side in seen_sides:
-            raise ValueError(f"Outer rectangle repeats side {side}")
-        seen_sides.add(side)
-
-    if seen_sides != {"xmin", "xmax", "ymin", "ymax"}:
-        raise ValueError("Outer profile is not a complete four-sided rectangle")
-
+        raise ValueError("Finished body bounding box collapsed below geometric tolerance")
     return profile, xmin, xmax, ymin, ymax
 
 
-def _profile_edge_outward_normal(segment: Line2D, bounds, tolerance: float) -> V3:
+def _bbox_side_index_for_line(
+    segment: Line2D,
+    bounds,
+    tolerance: float,
+) -> int | None:
+    """Return the matching bbox side index for a coincident outline line.
+
+    The test deliberately requires the finite segment to lie within the bbox
+    side interval. Sharing only the same infinite supporting line is not enough.
+    Side order is the planner's CCW order: ymin, xmax, ymax, xmin.
+    """
     xmin, xmax, ymin, ymax = bounds
     dx = segment.end.x - segment.start.x
     dy = segment.end.y - segment.start.y
     if abs(dy) <= tolerance and abs(dx) > tolerance:
         y = (segment.start.y + segment.end.y) / 2.0
-        if abs(y - ymin) <= tolerance:
-            return (0.0, -1.0, 0.0)
-        if abs(y - ymax) <= tolerance:
-            return (0.0, 1.0, 0.0)
-    elif abs(dx) <= tolerance and abs(dy) > tolerance:
+        inside = (
+            xmin - tolerance <= segment.start.x <= xmax + tolerance
+            and xmin - tolerance <= segment.end.x <= xmax + tolerance
+        )
+        if inside and abs(y - ymin) <= tolerance:
+            return 0
+        if inside and abs(y - ymax) <= tolerance:
+            return 2
+    if abs(dx) <= tolerance and abs(dy) > tolerance:
         x = (segment.start.x + segment.end.x) / 2.0
-        if abs(x - xmin) <= tolerance:
-            return (-1.0, 0.0, 0.0)
-        if abs(x - xmax) <= tolerance:
-            return (1.0, 0.0, 0.0)
-    raise ValueError("Rectangle edge does not lie on a proven exterior bound")
+        inside = (
+            ymin - tolerance <= segment.start.y <= ymax + tolerance
+            and ymin - tolerance <= segment.end.y <= ymax + tolerance
+        )
+        if inside and abs(x - xmax) <= tolerance:
+            return 1
+        if inside and abs(x - xmin) <= tolerance:
+            return 3
+    return None
+
+
+def _line_segment_on_fictive_blade_plane(
+    segment: Line2D,
+    cut: BladeCutIR,
+    tolerance: float,
+) -> bool:
+    """True when the SIDE1 outline segment is the Z=0 trace of a BLADEXY plane."""
+    if cut.source_kind != SOURCE_FICTIVE_FACE or cut.mode != BLADE_XY:
+        return False
+    n = cut.target_normal
+    # A fictive blade plane that is parallel to SIDE1 has no useful XY trace.
+    if math.hypot(n[0], n[1]) < 1e-9:
+        return False
+    for point in (segment.start, segment.end):
+        error = abs(n[0] * point.x + n[1] * point.y - cut.target_offset_mm)
+        if error > tolerance:
+            return False
+    return True
+
+
+def _outer_segment_blade_coverage(panel: PanelIR) -> tuple[PlanarProfileIR, list[bool]]:
+    """Classify each outer segment without discarding uncovered geometry."""
+    profile, xmin, xmax, ymin, ymax = _finished_bbox_stock_bounds(panel)
+    bounds = (xmin, xmax, ymin, ymax)
+    tolerance = panel.curve_tolerance_mm
+    bbox_sides = {
+        cut.source_segment_index
+        for cut in panel.blade_cuts
+        if cut.source_kind == SOURCE_PROFILE_OUTER
+    }
+    fictive = [
+        cut for cut in panel.blade_cuts
+        if cut.source_kind == SOURCE_FICTIVE_FACE and cut.mode == BLADE_XY
+    ]
+    covered: list[bool] = []
+    for segment in profile.chain.segments:
+        if not isinstance(segment, Line2D):
+            covered.append(False)
+            continue
+        bbox_side = _bbox_side_index_for_line(segment, bounds, tolerance)
+        bbox_covered = bbox_side is not None and bbox_side in bbox_sides
+        fictive_covered = any(
+            _line_segment_on_fictive_blade_plane(segment, cut, tolerance)
+            for cut in fictive
+        )
+        covered.append(bbox_covered or fictive_covered)
+    return profile, covered
+
+
+def profile_blade_residual_profiles(panel: PanelIR) -> list[PlanarProfileIR]:
+    """Return open, independently started runs not replaced by blade cuts.
+
+    This is a serialization view. The extracted closed silhouette in ``PanelIR``
+    remains immutable, while every covered segment is removed exactly once and
+    every remaining contiguous run becomes a separate open TPA profile.
+    """
+    profile_cuts = [
+        cut for cut in panel.blade_cuts
+        if cut.source_kind == SOURCE_PROFILE_OUTER
+    ]
+    if not profile_cuts:
+        return [_outer_profile(panel)]
+
+    profile, covered = _outer_segment_blade_coverage(panel)
+    segments = list(profile.chain.segments)
+    if all(covered):
+        return []
+    if not any(covered):
+        return [profile]
+
+    # Start immediately after a covered segment so a residual run never wraps
+    # around the end of the list and is never accidentally split in two.
+    first = next(index for index, value in enumerate(covered) if value)
+    ordered_indices = [(first + 1 + offset) % len(segments)
+                       for offset in range(len(segments))]
+    runs: list[list] = []
+    current: list = []
+    for index in ordered_indices:
+        if covered[index]:
+            if current:
+                runs.append(current)
+                current = []
+        else:
+            current.append(segments[index])
+    if current:
+        runs.append(current)
+
+    residuals: list[PlanarProfileIR] = []
+    base_id = profile.profile_id or OUTER_PROFILE_PROVENANCE
+    for number, run in enumerate(runs, 1):
+        residuals.append(PlanarProfileIR(
+            chain=CurveChain2D(
+                list(run), False,
+                name=f"FINAL_OUTER_RESIDUAL_{number}",
+                diagnostics=profile.chain.diagnostics,
+            ),
+            z_mm=profile.z_mm,
+            machining_side=profile.machining_side,
+            geometric_plane=profile.geometric_plane,
+            profile_id=f"{base_id}:residual:{number}",
+            source_face_ids=profile.source_face_ids,
+            provenance="body_silhouette_outer_residual",
+            containment=profile.containment,
+            z_mode=profile.z_mode,
+        ))
+    return residuals
 
 
 def plan_rectangular_profile_blade_cuts(
     panel: PanelIR,
     machine: BladeMachineProfile,
 ) -> list[BladeCutIR]:
-    """Replace the complete rectangular FINAL_OUTER_CONTOUR with four saw cuts.
+    """Plan native saw cuts for eligible finished-body XY bbox sides.
 
-    All-or-nothing by design.  Every side must be a straight axis-aligned edge;
-    BLADEX/BLADEY put the complete blade kerf on the rectangle's waste side.
-    The official custom macro fixes W95 Beta=90 for these two branches.
+    The squaring rectangle is independent from ``body_silhouette_outer``
+    topology.  Inclined/chamfered faces therefore do not preclude squaring.
+    BLADEX/BLADEY place their complete kerf on the bounding-box waste side and
+    the official custom macro fixes W95 Beta=90 for these two branches.
+
+    Only bbox sides containing at least one coincident straight outer-profile
+    segment are emitted. Other outer segments remain serializer-owned residual
+    profiles, unless a selected BLADEXY fictive-face plane produces them.
     """
     machine.validate()
     machine.require_verified_adapter()
-    profile, xmin, xmax, ymin, ymax = _rectangle_profile_geometry(panel)
+    profile, xmin, xmax, ymin, ymax = _finished_bbox_stock_bounds(panel)
     dimensions = (panel.stock_width, panel.stock_height, panel.thickness)
-    tolerance = panel.curve_tolerance_mm
-    bounds = (xmin, xmax, ymin, ymax)
     lead = machine.diameter_mm / 2.0 + machine.end_clearance_mm
 
     z_program, z2_enabled, z2_program, z2_feed, required_depth = _plan_pass_depths(
         machine=machine,
         beta_degrees=90.0,
         deepest_stock_z=-panel.thickness,
-        label="Blade rectangular outer profile",
+        label="Blade finished-bbox squaring",
     )
 
-    cuts: list[BladeCutIR] = []
-    for index, segment in enumerate(profile.chain.segments):
-        assert isinstance(segment, Line2D)
-        dx = segment.end.x - segment.start.x
-        dy = segment.end.y - segment.start.y
-        if abs(dy) <= tolerance and abs(dx) > tolerance:
-            mode = BLADE_X
-            travel = (1.0 if dx > 0 else -1.0, 0.0, 0.0)
-            alpha = 0.0 if dx > 0 else 180.0
-        elif abs(dx) <= tolerance and abs(dy) > tolerance:
-            mode = BLADE_Y
-            travel = (0.0, 1.0 if dy > 0 else -1.0, 0.0)
-            alpha = 90.0 if dy > 0 else 270.0
-        else:
-            raise ValueError(
-                f"Outer profile segment {index + 1} is not axis aligned"
-            )
+    # Deterministic CCW rectangle in stock coordinates.  This preserves the
+    # finished bounding box while placing the blade kerf outside it.
+    sides = (
+        # name, mode, start, end, outward, alpha
+        ("ymin", BLADE_X, (xmin, ymin), (xmax, ymin), (0.0, -1.0, 0.0), 0.0),
+        ("xmax", BLADE_Y, (xmax, ymin), (xmax, ymax), (1.0, 0.0, 0.0), 90.0),
+        ("ymax", BLADE_X, (xmax, ymax), (xmin, ymax), (0.0, 1.0, 0.0), 180.0),
+        ("xmin", BLADE_Y, (xmin, ymax), (xmin, ymin), (-1.0, 0.0, 0.0), 270.0),
+    )
 
-        outward = _profile_edge_outward_normal(segment, bounds, tolerance)
+    matching_sides = {
+        side_index
+        for segment in profile.chain.segments
+        if isinstance(segment, Line2D)
+        for side_index in (
+            _bbox_side_index_for_line(
+                segment, (xmin, xmax, ymin, ymax), panel.curve_tolerance_mm,
+            ),
+        )
+        if side_index is not None
+    }
+
+    cuts: list[BladeCutIR] = []
+    for index, (side_name, mode, start2, end2, outward, alpha) in enumerate(sides):
+        if index not in matching_sides:
+            continue
+        dx = end2[0] - start2[0]
+        dy = end2[1] - start2[1]
+        distance = math.hypot(dx, dy)
+        if distance <= 1e-9:
+            raise ValueError(f"Bounding-box side {side_name} collapsed")
+        travel = (dx / distance, dy / distance, 0.0)
         left_normal = (-travel[1], travel[0], 0.0)
         n_left = dot(outward, left_normal)
         if abs(n_left) < 0.5:
             raise ValueError(
-                f"Outer profile segment {index + 1}: cannot resolve waste-side compensation"
+                f"Bounding-box side {side_name}: cannot resolve waste-side compensation"
             )
         compensation = 1 if n_left > 0 else 2
 
-        # Program the finished line (plus calibrated residual only); controller
-        # compensation owns the saw width and must send it into +outward waste.
         shift = scale(outward, machine.normal_offset_mm)
         start_point = add(
-            add((segment.start.x, segment.start.y, 0.0), shift),
+            add((start2[0], start2[1], 0.0), shift),
             scale(travel, -lead),
         )
         end_point = add(
-            add((segment.end.x, segment.end.y, 0.0), shift),
+            add((end2[0], end2[1], 0.0), shift),
             scale(travel, lead),
         )
         end_axis = end_point[0] if mode == BLADE_X else end_point[1]
         cut_length = math.dist(start_point[:2], end_point[:2])
 
-        d = dot(outward, (segment.start.x, segment.start.y, 0.0))
+        d = dot(outward, (start2[0], start2[1], 0.0))
         section = plane_stock_section(outward, d, dimensions)
         if len(section) < 4:
             raise ValueError(
-                f"Outer profile segment {index + 1}: trim plane does not cross stock as expected"
+                f"Bounding-box side {side_name}: squaring plane does not cross stock as expected"
             )
 
         cuts.append(BladeCutIR(
@@ -933,25 +1013,29 @@ def plan_rectangular_profile_blade_cuts(
             end_axis_mm=end_axis,
         ))
 
-    if len(cuts) != 4 or {cut.mode for cut in cuts} != {BLADE_X, BLADE_Y}:
-        raise ValueError("Rectangular profile did not resolve to four BLADEX/BLADEY cuts")
     return cuts
 
 
 def profile_blade_consumed_profile_ids(panel: PanelIR) -> set[str]:
-    """Profiles completely replaced by validated profile-blade cuts."""
+    """Return FINAL_OUTER only when blades leave no residual segment."""
     cuts = [cut for cut in panel.blade_cuts if cut.source_kind == SOURCE_PROFILE_OUTER]
     if not cuts:
         return set()
     ids = {cut.source_profile_id for cut in cuts}
-    if len(cuts) != 4 or None in ids or len(ids) != 1:
+    if not 1 <= len(cuts) <= 4 or None in ids or len(ids) != 1:
         raise ValueError(
-            "Profile-blade conversion must contain exactly four cuts for one outer profile"
+            "Profile-blade trimming must contain one to four cuts for one outer profile"
         )
-    if {cut.source_segment_index for cut in cuts} != {0, 1, 2, 3}:
-        raise ValueError("Profile-blade conversion does not own all four rectangle segments")
-    return {next(iter(ids))}
+    side_indices = [cut.source_segment_index for cut in cuts]
+    if (any(index not in (0, 1, 2, 3) for index in side_indices)
+            or len(side_indices) != len(set(side_indices))):
+        raise ValueError("Profile-blade trimming repeats or misidentifies a bbox side")
 
+    profile, covered = _outer_segment_blade_coverage(panel)
+    profile_id = profile.profile_id or OUTER_PROFILE_PROVENANCE
+    if profile_id != next(iter(ids)):
+        raise ValueError("Profile-blade squaring ownership does not match FINAL_OUTER_CONTOUR")
+    return {profile_id} if all(covered) else set()
 
 def plan_blade_cuts(
     panel: PanelIR,
@@ -1087,6 +1171,11 @@ def validate_blade_cuts(panel: PanelIR) -> None:
         raise ValueError("Blade plan contains an unsupported source_kind")
 
     rebuilt: list[BladeCutIR] = []
+    # Execution contract: perform eligible bbox trim cuts first, then the
+    # selected inclined BLADEXY faces.  Internal/CAM work is serialized before
+    # the complete blade phase by tcn.py.
+    if profile:
+        rebuilt.extend(plan_rectangular_profile_blade_cuts(panel, machine))
     if fictive:
         rebuilt.extend(plan_blade_cuts(
             panel,
@@ -1101,8 +1190,6 @@ def validate_blade_cuts(panel: PanelIR) -> None:
             ],
             machine,
         ))
-    if profile:
-        rebuilt.extend(plan_rectangular_profile_blade_cuts(panel, machine))
 
     if cuts != rebuilt:
         raise ValueError(

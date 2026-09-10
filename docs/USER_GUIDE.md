@@ -242,11 +242,19 @@ Before creating executable CAM:
 
 Stop if any stock dimension, side assignment, contour, depth, or orientation
 does not match the Fusion model.
-# Optional blade cuts
+# Blade cuts
 
-Enable **Add Blade cut on fictive faces** after selecting the desired inclined
-faces to inspect an analysis plan using a local blade profile. Executable blade
-export is currently blocked pending verification of the custom PPC LAME/W95
-reference mapping. The checkbox stays armed during profile and geometry changes;
-only a new body or command resets it. Disable it to export ordinary geometry.
-See [Blade cuts](BLADE_CUTS.md) for evidence, configuration and remaining limits.
+Choose the validated local blade profile, then enable either option:
+
+- **Use blade for profile cuts** generates a BLADEX/BLADEY cut for every bbox
+  side containing at least one coincident straight outer segment. Each covered
+  segment is removed from `FINAL_OUTER_CONTOUR`; uncovered lines and curves are
+  retained as independently started open residual profiles.
+- **Add Blade cut on fictive faces** generates a BLADEXY for each selected
+  inclined face while retaining its SIDE7+ geometry for later workings.
+
+If both are enabled, internal profiles, holes and CAM run first, followed by
+bbox trimming and then inclined fictive-face cuts. Curved or uncovered outer
+segments remain in the output instead of disappearing. Review the reported
+Alpha, complementary Beta, Zp/Z2, correction and stock coverage before export.
+See [Blade cuts](BLADE_CUTS.md) for the complete contract.

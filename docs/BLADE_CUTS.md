@@ -1,104 +1,110 @@
-# Blade cuts for selected fictive faces: analysis only
+# Blade cuts
 
-**Automatic executable blade export is blocked.** The checkbox, profile picker,
-extraction and analysis planner are implemented. The custom PPC LAME/W95 evidence
-does not establish the complete mapping between programmed XYZ, compensation and
-the finished cutting plane. No profile setting can bypass this check. Existing
-geometry export remains available with the checkbox off.
+TribuExporter can generate executable blade workings for the custom Busellato
+Jet Master T configuration. The mapping has been validated by the project owner
+with repeated tests on the CNC. It uses the configured `lame.tmcr` working and
+the machine profile in `Tools/bladeGenerica.json`.
 
-Select inclined faces, enable **Add Blade cut on fictive faces**, and choose a
-local profile JSON. Valid analysis settings show candidate cuts and the blocked
-machine-export status. Incomplete settings show an error while preserving the
-checkbox and controls. Fictive frames and their profiles remain unchanged.
+Two independent options are available:
 
-## Actual machine evidence
+- **Use blade for profile cuts** creates native `BLADEX`/`BLADEY` workings for
+  eligible sides of the finished body's XY bounding box.
+- **Add Blade cut on fictive faces** creates one `BLADEXY` working for every
+  selected inclined fictive face.
 
-Parameter-only golden observations in `tests/fixtures/blade_observations.json`
-are compared with the original private files when available. They are distinct
-from synthetic geometry tests and do not imply physical calibration.
+Either option requires a valid blade profile. Both can be enabled together.
 
-| Source | Observation | Meaning and limit |
-|---|---|---|
-| 010 and 011 Divisorio verticale | DS=25, Alpha=270, Beta=51.97, Z=-31.74, U=870, correction=1 | Preserve these directed machine values. The files supply no fictive finished-plane reference. |
-| 001 Fianco sinistro | DH=780, Alpha=90, start Y=-180, U=1140 | End Y=960, extending 180 mm each end. With diameter 300 this is radius 150 plus clearance 30. |
-| Same left-side program | Z1=-3, Z2=-28.07, second pass enabled=1 | The actual macro supports an enabled second-depth pass. |
+## Machine contract
 
-The former `top_xy_blade_distance` analysis divides vertical depth by the
-horizontal length of the normal. Under its complementary-angle convention that
-is division by cos(Beta): **-25/cos(51.97 degrees) = -40.57954**. The real divider
-record instead matches **-25/sin(51.97 degrees) = -31.73844**, rounded to -31.74.
-The former analysis is therefore not a verified adapter for these records.
+The profile must use `z_reference: "busellato_lame_w95"`. For this machine:
 
-The named `ppc_lame_beta_projection_observed` contract and `ppc_observed_depth()`
-encode the observed scalar relationship. Full planning under that contract
-fails because XY/contact placement remains unresolved. Simply exchanging sine
-and cosine would not establish the reference point. The left-side program does
-contain GSIDE geometry, but the macro X differs from its top-plane intersection.
-No default zero offset or label Zp resolves this discrepancy.
+- `BLADEX` and `BLADEY` are the native axis-aligned squaring workings;
+- `BLADEXY` accepts the calculated Alpha and the machine-verified complementary
+  Beta convention;
+- X/Y locate the blade-plane trace on SIDE1 at Z=0;
+- Zp and Z2 are signed distances along the blade-depth coordinate;
+- the vertical component of the programmed depth is
+  `abs(Z) × sin(abs(Beta))`;
+- compensation places the blade width on the waste side;
+- `normal_offset_mm` is a calibrated residual offset and is not half the kerf;
+- `breakthrough_mm` is extra travel along the blade-depth coordinate;
+- `score_then_full` emits a shallow Zp pass followed by the full-depth Z2 pass;
+- chord calculation remains off for these straight exterior cuts.
 
-Alpha reversal remains unproven for the machine. Analysis considers only
-explicitly listed directed angles, in preference order, without reducing Alpha
-modulo 180. Tests preserve Alpha 270 and cover both directions; their geometric
-equivalence is not evidence that machine reversal is safe.
+The configured travel angles are preferences for choosing the direction of a
+`BLADEXY` cut. They do not restrict arbitrary Alpha values: when no preference
+matches the plane exactly, the planner uses the deterministic plane-intersection
+direction. Opposite directions retain their own compensation result.
 
-The 30 mm clearance is supported for the longitudinal example. The dividers'
-U equals DH=870, with no explicit extension in that field. It is not a universal
-lead policy. The custom macro forwards rotated cuts to W95 and W2202, including
-Z2, its enable flag and second-pass feed. Its separate editor graphics do not
-receive Z2. The newer generic TPA blade macro is not substituted.
+## Profile squaring
 
-## Analysis configuration
+The candidate rectangle is derived from the finished body's width and height,
+translated into stock coordinates by the configured allowance. A candidate
+side becomes a blade cut only when at least one straight outer-profile segment
+lies on that finite bbox side. Collinear splits still produce one cut.
 
-Copy [blade-profile.template.json](blade-profile.template.json) to a private
-location. Null required values deliberately prevent accidental use. A complete
-profile permits analysis only. The user's existing tool files are not silently
-migrated or declared verified.
+The four candidate sides are considered in counter-clockwise order; only the
+eligible ones are emitted:
 
-| Fields | Meaning |
-|---|---|
-| `tool_id`, `macro_path` | Explicit positive blade ID and exact custom .tmcr path. |
-| `diameter_mm`, `kerf_mm`, `max_cutting_depth_mm` | Physical saw dimensions, with usable penetration at most its radius. End Mill-labelled library fields are not interpreted automatically as blade diameter or kerf. |
-| `travel_angles_degrees` | Nonempty unique directed angles in [0,360), in preference order. Opposite travel must be listed independently. |
-| `min_beta_degrees`, `max_abs_beta_degrees`, `beta_sign` | Explicit signed limits and analysis sign convention; not proof of machine behavior. |
-| `z_reference` | `contact_point_z` and `top_xy_blade_distance` are synthetic assumptions. `ppc_lame_beta_projection_observed` refuses full planning. |
-| `normal_offset_mm`, `compensation_reference` | Explicit residual reference shift after controller correction, and intended `finished_surface` boundary. No automatic second half-kerf offset. |
-| `breakthrough_mm`, `end_clearance_mm` | Nonnegative vertical breakthrough and extra travel beyond radius at each end. |
-| `pass_policy` | Only `single_pass`. Two-pass/chord requests fail explicitly; machine support does not imply automatic planning support. |
-| `spindle_rpm`, `entry_feed`, `cutting_feed` | Positive explicit overrides in machine units, or null for macro/tool defaults. Generic 18000 RPM / 5000 feeds are not copied automatically. |
+1. bottom edge: `BLADEX`;
+2. right edge: `BLADEY`;
+3. top edge: `BLADEX`;
+4. left edge: `BLADEY`.
 
-The synthetic assumptions mean respectively: XYZ lies on the compensated
-contact plane; or XY lies on its top trace and Z measures inclined penetration.
-Neither is a proven custom PPC contract.
+Each cut extends by one blade radius plus `end_clearance_mm` at both ends. The
+blade plane stays on the finished bbox side while compensation puts the kerf in
+waste.
 
-The planner checks the whole-body supporting bound and separately checks that
-the selected face coincides with the plane. Both must be within tolerance; large
-negative support bounds fail. It covers stock thickness and waste-side kerf
-bounds. Duplicate/re-entrant planes, insufficient reach, unsupported travel and
-incomplete settings fail. Profiles and cut IR are immutable and independent of
-Fusion. Future two-pass planning needs explicit Z2 enable/depth, chord mode and
-optional second-pass feed rather than discarding these settings.
+Every outer segment produced by a bbox cut or by the SIDE1 trace of a selected
+fictive-face `BLADEXY` is removed individually. The remaining cyclic runs are
+written as separate open profiles, each with an explicit initial point. Curves,
+diagonals and other uncovered geometry therefore remain machinable. When every
+segment is blade-produced, `FINAL_OUTER_CONTOUR` is omitted completely.
 
-The serializer checks current stock/frames and quantized geometry, then requires
-a verified adapter before writing any file. None currently exists. Raw field
-encoding is tested separately against the single-pass observations; those tests
-do not claim to derive their values from a finished face.
+## Fictive-face cuts
 
-## UI state and verification
+For each selected inclined planar face, extraction first builds the SIDE7+
+frame and verifies that the face is exterior and coincident with its requested
+cutting plane. The planner then intersects that plane with the complete stock,
+checks blade reach, derives Alpha/Beta and waste-side compensation, and emits a
+`BLADEXY` on SIDE1. The SIDE7+ frame and its profiles remain in the TCN for
+subsequent work on that physical face.
 
-Checkbox, picker and manual path changes have dedicated event paths. Cancel
-preserves path, visibility, status and checkbox. Success loads the profile and
-refreshes explicitly even when nested Fusion events are suppressed. Stock,
-tolerance and fictive-face changes do not restore body preferences. Only an
-actual SIDE1 body/occurrence change disarms blade intent. New commands start off;
-the saved profile path can be restored.
+## Execution order
 
-Run `python -m unittest discover -v`. Tests cover synthetic geometry, actual
-records, production blocking, existing-file preservation and UI cases A-G using
-the real handlers with fake Fusion controls. Live extraction has also been
-checked on the user's test body. Mocked controls do not prove live picker behavior.
+The TCN is deliberately ordered as follows:
 
-To unblock production, pair a known finished-plane reference with its exact
-custom macro call and tool/reference configuration. Reproduce plane, depth,
-travel, correction and coverage together; complete the required TpaCAD
-open/inspect/save/diff round trip and user confirmation before enabling machine
-output. No machine execution was performed during this work.
+1. internal geometry profiles, native holes and optional Fusion CAM;
+2. eligible bbox `BLADEX`/`BLADEY` trimming cuts, when enabled;
+3. selected inclined `BLADEXY` fictive-face cuts.
+
+This keeps internal machining ahead of the operations that release and finish
+the outer panel.
+
+## Machine profile
+
+The active validated profile is `Tools/bladeGenerica.json`. It records tool
+3000, blade diameter 300 mm, width 3.2 mm, usable penetration 85 mm, the
+Busellato W95 reference, Beta sign, pass policy and clearances used by the
+exporter. Null speed fields leave spindle and feeds to the machine/macro tool
+technology.
+
+The original CNC tool-table screen remains the evidence for diameter, kerf and
+machine technology. Values such as LA, C-axis offset and wear belong to the CNC
+tool record and are not reapplied as exporter geometry offsets.
+
+## Validation
+
+Run:
+
+```powershell
+python -m unittest discover -v
+```
+
+The blade tests cover the verified W95 depth projection, complementary Beta,
+arbitrary Alpha, opposite directions, Z2 scoring, stock coverage, stale-plan
+detection, quantized-plane reconstruction, bbox squaring, collinear silhouette
+splits, partial bbox eligibility, retained curves, independent residual runs,
+serialization fields and blade-phase ordering. Automated tests complement the
+completed CNC validation; they do not replace normal operator checks for a new
+part or stock setup.

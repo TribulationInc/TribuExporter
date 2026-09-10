@@ -69,8 +69,9 @@ Do not treat automated tests as CNC validation. For the first production body:
 8. Repeat with two selected slopes and confirm they become SIDE7 and SIDE8,
    never one merged face.
 9. Repeat with a plane rotated in panel XY, not only a simple Z bevel.
-10. Confirm no SETUP, tool orientation, roughing, saw/blade instruction or
-    compensation was generated.
+10. With both blade options disabled, confirm no saw/blade instruction or
+    compensation was generated. When fictive-face blade cuts are enabled,
+    confirm one matching BLADEXY is generated while SIDE7+ remains available.
 
 Stop before machine execution if any contour, Z value, stock dimension,
 orientation or profile boundary differs from the Fusion body.
@@ -130,11 +131,27 @@ and complete-file line counting.
    permits export and does not alter any tolerance.
 # Blade acceptance
 
-Run `python -m unittest tests.test_blade tests.test_blade_evidence tests.test_blade_ui -v`
-for synthetic geometry, actual machine observations, production blocking and UI
-state tests A-G. These tests do not establish the full machine reference mapping.
+Run:
 
-See [Blade verification](BLADE_CUTS.md#ui-state-and-verification). Confirm live
-checkbox/picker behavior and ordinary geometry export with blade intent off.
-Machine output must remain blocked until a complete reference adapter and the
-required Fusion/TpaCAD round trip establish the finished-side cut plane.
+```powershell
+python -m unittest tests.test_blade tests.test_blade_evidence tests.test_blade_ui -v
+```
+
+The tests cover the machine-validated W95 projection and complementary Beta,
+arbitrary Alpha, opposite travel directions, scoring plus full-depth Z2,
+quantized-plane checks and UI state transitions.
+
+For profile trimming, verify that eligible cuts are derived from the
+finished-body XY bounding box in bottom/right/top/left order. A bbox side with
+no coincident straight outer segment must not receive a cut. Collinear splits
+on one side must still produce one cut.
+
+Verify every covered `FINAL_OUTER_CONTOUR` segment is removed once. Curves,
+chamfers and other uncovered segments must remain as independently started open
+residual profiles. When a selected fictive-face blade plane covers a residual
+straight segment, that segment must disappear from the residual output.
+
+In the combined file, inspect the order: internal profiles, native holes and CAM
+first; bbox BLADEX/BLADEY cuts second; fictive-face BLADEXY cuts last. Confirm
+with both blade options off that the ordinary geometry path is unchanged. See
+[Blade cuts](BLADE_CUTS.md) for the machine profile and operator checks.

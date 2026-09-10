@@ -193,7 +193,7 @@ not used as a substitute: construct elements remain programmed geometry and can
 still participate in profile tooling even though they are excluded from piece
 execution.
 
-## Real and future fictive machining frames
+## Real and fictive machining frames
 
 Profiles reference a machining coordinate frame. SIDE1 and SIDE3-SIDE6 use
 predefined real-face frames. Explicitly operator-selected inclined planar
@@ -252,18 +252,28 @@ threshold only warns; it never blocks export or changes a tolerance.
 3D simplification preserves movement/feed boundaries, Z extrema, endpoints and
 turns of at least 15 degrees. Its report gives the maximum measured distance of
 every removed source point from its replacement chord. It is off by default.
-# Explicit fictive-face blade intent
+# Blade manufacturing intent
 
-`blade.py` separates pure stock/plane planning from an explicit custom Busellato
-machine-reference contract. `fusion_extract.py` supplies complete-body support
-bounds for each requested face in a consistent occurrence context. `PanelIR`
-holds resolved `BladeCutIR` operations separately from profiles and holes.
+`blade.py` separates stock and plane planning from the custom Busellato
+LAME/W95 machine contract. `fusion_extract.py` supplies complete-body support
+bounds in one occurrence context. `PanelIR` stores resolved `BladeCutIR`
+operations separately from profiles and holes.
 
-The writer revalidates against the current stock and fictive frames and checks
-the target plane reconstructed from quantized analysis values. Production output
-is blocked until a complete PPC machine adapter is verified. The raw W#1052
-encoder is tested separately. GEO/GSIDE and profile ownership remain unchanged. No macro bodies or tool
-tables are bundled. See [Blade cuts](BLADE_CUTS.md) for the reference contracts,
-scope and verification limits. Whole-body support and selected-face contact are
-separate extraction guarantees; neither synthetic consistency nor a profile
-setting can bypass the production gate.
+Profile trimming considers the four sides of the finished-body XY bounding box.
+It emits `BLADEX`/`BLADEY` only for sides containing at least one coincident
+straight silhouette segment. Collinear BRep splits remain eligible. Covered
+segments are removed individually; the serializer groups every remaining
+cyclic run into an independently started open residual profile. Curves and
+other uncovered segments therefore remain explicit machining geometry.
+
+Each explicitly selected inclined face creates a `BLADEXY` operation and keeps
+its GEO/GSIDE frame and profiles. The planner verifies complete-body support,
+selected-face contact, stock coverage, blade reach and waste-side compensation.
+The writer revalidates current stock and frames and reconstructs the quantized
+target plane before serialization.
+
+The machine-validated adapter uses the complementary Beta convention and W95
+depth projection recorded by `Tools/bladeGenerica.json`. Arbitrary Alpha is
+supported; configured travel angles are deterministic preferences. Output order
+is internal profiles, holes and CAM, followed by bbox squaring and selected
+fictive-face cuts. See [Blade cuts](BLADE_CUTS.md) for the complete contract.

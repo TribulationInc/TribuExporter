@@ -2,12 +2,12 @@
 
 **Fusion 360 geometry exporter for TpaCAD and CNC panel work.**
 
-[English guide](docs/USER_GUIDE.md) · [Guida italiana](docs/GUIDA_UTENTE_IT.md) · [Architecture](docs/ARCHITECTURE.md) · [Testing](docs/TESTING.md)
+[English guide](docs/USER_GUIDE.md) · [Guida italiana](docs/GUIDA_UTENTE_IT.md) · [Guida lama Busellato](docs/Guida_Lama_Busellato_TpaCAD.md) · [Architecture](docs/ARCHITECTURE.md) · [Testing](docs/TESTING.md)
 
 TribuExporter transfers the manufacturing geometry of a panel-like Fusion 360
 solid into a profile-first `.tcn` file. The objective is simple: preserve the
 modelled part and make its contours easy to select in TpaCAD. Native simple
-blind holes, selected fictive-face blade analysis, and one explicitly selected
+blind holes, executable blade cuts, and one explicitly selected
 Fusion toolpath are opt-in features; all are disabled by default.
 
 ```text
@@ -15,9 +15,8 @@ Fusion 360 solid → TribuExporter → independent TPA profiles → TpaCAD CAM
 ```
 
 Geometry profiles leave tool and setup assignment to TpaCAD. Optional native-hole
-output never selects a tool. The explicit blade option uses an operator-supplied
-machine profile for analysis. Executable blade output is blocked until the
-custom PPC LAME/W95 reference mapping is verified against finished geometry.
+output never selects a tool. Blade output uses the machine-validated custom
+Busellato LAME/W95 contract and the configured local blade profile.
 See [blade setup and supported scope](docs/BLADE_CUTS.md).
 
 ![Independent outer, recessed and internal profiles in TpaCAD](docs/images/tpacad-independent-profiles.png)
@@ -34,9 +33,12 @@ See [blade setup and supported scope](docs/BLADE_CUTS.md).
   side's native TpaCAD coordinate system.
 - Explicitly selected planar inclined faces as additional fictive faces
   `SIDE7+`.
-- **Add Blade cut on fictive faces**: analysis of selected exterior inclined
-  faces, with whole-body preservation checks and a local machine profile.
-  Fictive geometry is retained; executable blade export is currently blocked.
+- **Use blade for profile cuts**: up to four executable BLADEX/BLADEY cuts from
+  the finished-body XY bounding box. A side is cut only when the outer profile
+  contains a coincident straight segment; uncovered runs remain open profiles.
+- **Add Blade cut on fictive faces**: executable BLADEXY cuts for selected
+  exterior inclined faces, with whole-body and finished-plane checks. The
+  resulting SIDE7+ geometry remains available for later workings.
 - Exact lines and circular arcs/circles.
 - Other bounded planar curves linearized at an explicit chordal tolerance.
 - A persistent profile checklist, stored per Fusion body after export.
@@ -81,10 +83,9 @@ This is a specialized bridge for panel components that are already modelled
 with manufacturing in mind. It is not a generic CAD translator, a nesting
 system, a CAM kernel, or an automatic feature-recognition engine.
 
-The project is experimental. Opening successfully in TpaCAD proves file and
-geometry compatibility; it does not by itself prove that a program is safe to
-run on a CNC machine. Inspect every face, profile, coordinate, depth, stock
-dimension, and assigned setup before execution.
+The blade mapping has been validated on the project's Busellato Jet Master T.
+Every new part still requires the normal checks of faces, coordinates, depths,
+stock dimensions, tool availability, compensation and machine simulation.
 
 ## Development
 

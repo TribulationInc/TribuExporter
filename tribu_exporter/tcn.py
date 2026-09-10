@@ -2,8 +2,9 @@
 
 Each PlanarProfileIR starts a new TPA profile with explicit XI/YI. Z is either
 explicit geometric depth or deliberately omitted for setup-controlled geometry.
-A fully converted rectangular ``body_silhouette_outer`` is consumed by four
-BLADEX/BLADEY calls and is therefore not emitted again as mill geometry.
+Eligible finished-body XY bounding-box sides can be cut by BLADEX/BLADEY calls.
+Covered ``body_silhouette_outer`` segments are removed individually; uncovered
+runs remain independently started open profiles.
 Native blind holes are emitted as minimal W#81 point workings without tool #205.
 """
 
@@ -13,7 +14,7 @@ from pathlib import Path
 
 from .blade import (
     BLADE_X, BLADE_Y, BLADE_XY, SOURCE_PROFILE_OUTER,
-    profile_blade_consumed_profile_ids,
+    profile_blade_consumed_profile_ids, profile_blade_residual_profiles,
 )
 from .model import (
     Arc2D, EPS_MM, Line2D, MachiningFrameKind, MachiningSide,
@@ -89,11 +90,21 @@ class TcnGeometryWriter:
     def profiles_for_export(self, panel: PanelIR) -> list[PlanarProfileIR]:
         suppressed = {id(zero) for zero, _ in self.z0_duplicate_pairs(panel)}
         consumed = profile_blade_consumed_profile_ids(panel)
-        return [
-            profile for profile in self.selected_profiles(panel)
-            if id(profile) not in suppressed
-            and (profile.profile_id or profile.provenance) not in consumed
-        ]
+        has_profile_blades = any(
+            cut.source_kind == SOURCE_PROFILE_OUTER for cut in panel.blade_cuts
+        )
+        result: list[PlanarProfileIR] = []
+        for profile in self.selected_profiles(panel):
+            if id(profile) in suppressed:
+                continue
+            profile_id = profile.profile_id or profile.provenance
+            if profile_id in consumed:
+                continue
+            if has_profile_blades and profile.provenance == "body_silhouette_outer":
+                result.extend(profile_blade_residual_profiles(panel))
+            else:
+                result.append(profile)
+        return result
 
     def _line(self, segment: Line2D, z_mm: float, first: bool,
               z_mode: ProfileZMode) -> str:
@@ -185,8 +196,18 @@ class TcnGeometryWriter:
             if cut.source_kind == SOURCE_PROFILE_OUTER
             else f"Blade~cut~for~SIDE{cut.target_side}"
         )
+        # TpaCAD registers the three LAME selectors as three distinct complex
+        # working codes.  The outer code matters: using W#1052 with r9=0/1
+        # reaches the LAME branch, but TpaCAD still classifies/graphs/optimizes
+        # the call as BLADEXY.  Match TpaCAD's own emitted contract exactly.
+        working_code = {
+            BLADE_X: 1050,
+            BLADE_Y: 1051,
+            BLADE_XY: 1052,
+        }[cut.mode]
+
         fields = [
-            f"W#1052{{ ::WT2 WS={number} W$={label}",
+            f"W#{working_code}{{ ::WT2 WS={number} W$={label}",
             f" #8098={machine.macro_path}",
             " #6=1",
             f" #8509={cut.mode}",
@@ -250,15 +271,18 @@ class TcnGeometryWriter:
         return "".join(fields)
 
     def blade_lines(self, panel: PanelIR) -> list[str]:
-        """Serialize all planned blade workings in deterministic panel order."""
-        return [self._blade(cut, number) for number, cut in enumerate(panel.blade_cuts, 1)]
+        """Serialize blade phase: bbox squaring first, then inclined fictive cuts."""
+        profile = [cut for cut in panel.blade_cuts if cut.source_kind == SOURCE_PROFILE_OUTER]
+        fictive = [cut for cut in panel.blade_cuts if cut.source_kind != SOURCE_PROFILE_OUTER]
+        ordered = profile + fictive
+        return [self._blade(cut, number) for number, cut in enumerate(ordered, 1)]
 
     def append_blades_to_tcn(self, tcn_text: str, panel: PanelIR) -> str:
         """Insert blade workings at the END of SIDE#1 in an existing TCN.
 
         This is used after CAM append: milling/drilling/CAM stay upstream and the
-        saw trim remains the final SIDE1 operation, so the finished rectangle is
-        not released before later machining.
+        blade phase remains the final SIDE1 operation. Within that phase the
+        bounding box is squared first and selected inclined fictive faces follow.
         """
         if not panel.blade_cuts:
             return tcn_text

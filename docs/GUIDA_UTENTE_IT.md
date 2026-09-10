@@ -246,12 +246,20 @@ Prima di creare lavorazioni eseguibili:
 
 Fermati se una dimensione del grezzo, un'assegnazione di faccia, un contorno,
 una profondità o un orientamento non corrisponde al modello Fusion.
-# Lamate sulle facce fittizie
+# Tagli lama
 
-Dopo aver selezionato le facce inclinate, attivare **Add Blade cut on fictive
-faces** e scegliere il profilo della lama per analizzare i tagli. L'esportazione
-eseguibile delle lamate resta bloccata finché il riferimento XYZ della macro
-PPC LAME/W95 non è verificato rispetto alla faccia finita. Il cambio di profilo
-o del grezzo non disattiva la casella; un nuovo corpo o comando la azzera.
-Disattivarla per esportare la geometria ordinaria. Evidenze e limiti sono
-descritti in [Blade cuts](BLADE_CUTS.md).
+Scegli il profilo lama validato, quindi abilita una o entrambe le opzioni:
+
+- **Use blade for profile cuts** genera una BLADEX/BLADEY per ogni lato del
+  rettangolo d'ingombro che contiene almeno un tratto rettilineo coincidente del
+  profilo esterno. Ogni tratto coperto viene eliminato da
+  `FINAL_OUTER_CONTOUR`; linee e curve non coperte restano come profili residui
+  aperti e indipendenti.
+- **Add Blade cut on fictive faces** genera una BLADEXY per ogni faccia inclinata
+  selezionata e conserva la relativa SIDE7+ per lavorazioni successive.
+
+Con entrambe attive, il programma esegue prima profili interni, fori e CAM, poi
+il taglio dei lati bbox applicabili e infine le facce inclinate. Curve e tratti
+perimetrali non coperti restano nel TCN: nessun residuo viene eliminato.
+Controlla nel rapporto Alpha, Beta complementare, Zp/Z2, correzione e copertura
+del grezzo. Il contratto completo è in [Blade cuts](BLADE_CUTS.md).

@@ -46,7 +46,7 @@ TOOLBAR_TARGETS = (
     ("CAMEnvironment", "CAMScriptsAddinsPanel"),
 )
 LOG_PATH = Path(tempfile.gettempdir()) / "tribu_tpa_debug.log"
-BUILD_ID = "2026-09-08.3-rectangular-profile-blade"
+BUILD_ID = "2026-09-09.6-partial-blade-profile-residuals"
 ATTRIBUTE_GROUP = "TribuExporterV1"
 PROFILE_SELECTION_ATTRIBUTE = "profile_export_selection"
 
@@ -246,7 +246,9 @@ def _extract_from_inputs(inputs, logger):
     if _profile_blade_enabled(inputs):
         assert machine is not None
         profile_cuts = plan_rectangular_profile_blade_cuts(panel, machine)
-        panel.blade_cuts.extend(profile_cuts)
+        # Physical execution order: square the finished XY bounding box first,
+        # then cut the operator-selected inclined fictive faces.
+        panel.blade_cuts[:] = profile_cuts + list(panel.blade_cuts)
 
     if panel.blade_cuts:
         validate_blade_cuts(panel)
@@ -263,7 +265,7 @@ def _extract_from_inputs(inputs, logger):
         )
         inputs.itemById("blade_status").text = (
             f"READY: {len(panel.blade_cuts)} blade cut(s) "
-            f"({profile_count} rectangular profile, {fictive_count} inclined); "
+            f"({profile_count} bbox trim, {fictive_count} inclined); "
             f"tool {first.machine.tool_id}; {first.machine.diameter_mm:g} mm blade; "
             f"{pass_text}."
         )
@@ -364,7 +366,8 @@ def _populate_profile_choices(inputs, state: CommandState, panel) -> None:
         dropdown.listItems.add(_profile_label(profile), selected)
     inputs.itemById("profile_status").text = (
         f"Detected {len(state.profile_keys)} optional profiles. "
-        "FINAL_OUTER_CONTOUR is exported unless completely consumed by rectangular blade trim; "
+        "Blade-covered FINAL_OUTER segments are replaced individually; "
+        "uncovered segments remain as independent residual profiles. "
         "selected fictive-face loops remain geometric inventory."
     )
     state.panel = panel
@@ -466,9 +469,10 @@ def _report(panel, writer: TcnGeometryWriter | None = None,
                 else ""
             )
             if cut.source_kind == SOURCE_PROFILE_OUTER:
+                bbox_names = ("bottom", "right", "top", "left")
                 source_text = (
                     f"outer profile={cut.source_profile_id}, "
-                    f"segment={cut.source_segment_index + 1}"
+                    f"bbox side={bbox_names[cut.source_segment_index]}"
                 )
             else:
                 source_text = f"Fusion face={cut.source_face_id}"
@@ -485,7 +489,8 @@ def _report(panel, writer: TcnGeometryWriter | None = None,
             )
         lines.extend((
             "Busellato LAME/W95 mapping enabled; chord calculation is Off.",
-            "BLADEX/BLADEY are used only for a proven four-line XY rectangle; "
+            "Each eligible bbox side produces one BLADEX/BLADEY; covered outer "
+            "segments are removed and uncovered runs remain open profiles.",
             "BLADEXY remains reserved for inclined fictive faces.",
             "Zp/Z2 breakthrough is measured along the blade-depth coordinate.",
             "Blade width is compensated into waste; finished geometry owns the target line/plane.",
@@ -512,21 +517,28 @@ def _report(panel, writer: TcnGeometryWriter | None = None,
             )
         lines.append("")
     for index, profile in enumerate(exported_profiles, 1):
-        role = " [MANDATORY FINISHED OUTER CONTOUR]" if (
-            profile.provenance == "body_silhouette_outer"
-        ) else ""
+        role = (
+            " [MANDATORY FINISHED OUTER CONTOUR]"
+            if profile.provenance == "body_silhouette_outer"
+            else " [UNBLADED OUTER RESIDUAL]"
+            if profile.provenance == "body_silhouette_outer_residual"
+            else ""
+        )
         z_text = ("unspecified (TpaCAD setup-controlled)"
                   if profile.z_mode == ProfileZMode.UNSPECIFIED
                   else f"{profile.z_mm:.4f} mm")
         source_text = (
             "synthetic whole-body projection"
-            if profile.provenance == "body_silhouette_outer"
+            if profile.provenance in (
+                "body_silhouette_outer", "body_silhouette_outer_residual",
+            )
             else f"Fusion face={profile.source_face_id}, loop={profile.containment}"
         )
         lines.append(
             f"{index}. {profile.chain.name}{role}: SIDE{int(profile.machining_side)}, "
             f"local Z={z_text}, "
-            f"segments={len(profile.chain.segments)}, closed=yes, "
+            f"segments={len(profile.chain.segments)}, "
+            f"closed={'yes' if profile.chain.closed else 'no'}, "
             f"{source_text}"
         )
     if suppressed_pairs:
@@ -571,7 +583,7 @@ def _report(panel, writer: TcnGeometryWriter | None = None,
         "Equal depth, coplanarity, shared edges, and connected endpoints never merge faces.",
         "SIDE1 and orthogonal lateral faces export only after exact-face directional first-hit proof.",
         "Unchecked profiles remain in the geometric inventory but are not written to TCN.",
-        "Profiles remain independently started geometry; rectangular FINAL_OUTER may be fully consumed by four executable blade workings.",
+        "Profiles remain independently started geometry; blade-covered FINAL_OUTER segments are replaced and every uncovered run is retained.",
         "When enabled, native simple blind holes are executable W#81 point workings; #205 tool selection is never emitted.",
         "Verify every hole's SIDE, center, negative depth, and diameter before CNC execution.",
         "", "Continue with export?",
@@ -796,7 +808,8 @@ class InputChangedHandler(adsk.core.InputChangedEventHandler):
                 if _blade_requested(self.inputs):
                     self.inputs.itemById("blade_status").text = (
                         "Choose the configured blade machine profile. "
-                        "Profile cuts currently require a four-line XY rectangle."
+                        "Eligible bbox-aligned outer segments become blade cuts; "
+                        "all residual geometry remains exported."
                     )
                 else:
                     self.inputs.itemById("blade_status").text = "Blade export is off."
@@ -949,7 +962,7 @@ class CreatedHandler(adsk.core.CommandCreatedEventHandler):
         inputs.addStringValueInput("blade_profile_path", "Blade machine profile", "")
         inputs.addBoolValueInput("choose_blade_profile", "Choose blade profile...", False, "", False)
         inputs.addTextBoxCommandInput(
-            "blade_status", "", "Blade export is off. Rectangular profile mode requires 4 straight X/Y sides.", 3, True,
+            "blade_status", "", "Blade export is off. Profile mode squares the finished XY bounding box, then applies selected fictive-face cuts.", 3, True,
         )
         _show_blade_inputs(inputs)
         inputs.addValueInput(
